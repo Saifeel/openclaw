@@ -1,28 +1,38 @@
 services:
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
+    user: "1001:1001"
     environment:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      RESEARCH_RELAY_ENABLED: ${RESEARCH_RELAY_ENABLED:-false}
+      RESEARCH_UPSTREAM_URL: ${RESEARCH_UPSTREAM_URL:-}
+      RESEARCH_SHARED_TOKEN: ${RESEARCH_SHARED_TOKEN:-}
+      RESEARCH_REQUEST_TIMEOUT_SEC: ${RESEARCH_REQUEST_TIMEOUT_SEC:-15}
+      RESEARCH_MAX_TOPIC_LEN: ${RESEARCH_MAX_TOPIC_LEN:-500}
+      RESEARCH_MAX_LABEL_LEN: ${RESEARCH_MAX_LABEL_LEN:-100}
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
       ## Uncomment the lines below to enable sandbox isolation
       ## (agents.defaults.sandbox). Requires Docker CLI in the image
       ## (build with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1) or use
       ## docker-setup.sh with OPENCLAW_SANDBOX=1 for automated setup.
       ## Set DOCKER_GID to the host's docker group GID (run: stat -c '%g' /var/run/docker.sock).
       # - /var/run/docker.sock:/var/run/docker.sock
-    # group_add:
-    #   - "${DOCKER_GID:-999}"
+    group_add:
+      - "${DOCKER_GID:-999}"
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+      - "127.0.0.1:18791:18791"
     init: true
     restart: unless-stopped
     command:
@@ -33,7 +43,7 @@ services:
         "--bind",
         "${OPENCLAW_GATEWAY_BIND:-lan}",
         "--port",
-        "18789",
+        "18789"
       ]
     healthcheck:
       test:
@@ -50,6 +60,7 @@ services:
 
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
+    user: "1001:1001"
     network_mode: "service:openclaw-gateway"
     cap_drop:
       - NET_RAW

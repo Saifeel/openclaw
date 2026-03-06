@@ -265,6 +265,13 @@ export function createCommandHandlers(context: CommandHandlerContext) {
           chatLog.addSystem(`status failed: ${String(err)}`);
         }
         break;
+      case "research":
+        if (!args) {
+          chatLog.addSystem("usage: /research [--label <label>] <topic>");
+          break;
+        }
+        await sendMessage(`/research ${args}`);
+        break;
       case "agent":
         if (!args) {
           await openAgentSelector();

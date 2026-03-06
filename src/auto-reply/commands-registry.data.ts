@@ -173,6 +173,22 @@ function buildChatCommands(): ChatCommandDefinition[] {
       category: "status",
     }),
     defineChatCommand({
+      key: "research",
+      nativeName: "research",
+      description: "Submit a research job through the configured relay.",
+      textAlias: "/research",
+      category: "tools",
+      args: [
+        {
+          name: "topic",
+          description: "Research topic",
+          type: "string",
+          captureRemaining: true,
+          required: true,
+        },
+      ],
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",

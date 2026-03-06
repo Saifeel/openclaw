@@ -104,6 +104,30 @@ describe("tui command handlers", () => {
     expect(requestRender).toHaveBeenCalled();
   });
 
+  it("routes /research to gateway send with the full slash command", async () => {
+    const { handleCommand, sendChat, addUser } = createHarness();
+
+    await handleCommand("/research --label market-scan portable water bottle market");
+
+    expect(addUser).toHaveBeenCalledWith(
+      "/research --label market-scan portable water bottle market",
+    );
+    expect(sendChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "/research --label market-scan portable water bottle market",
+      }),
+    );
+  });
+
+  it("shows /research usage when topic is missing", async () => {
+    const { handleCommand, sendChat, addSystem } = createHarness();
+
+    await handleCommand("/research");
+
+    expect(addSystem).toHaveBeenCalledWith("usage: /research [--label <label>] <topic>");
+    expect(sendChat).not.toHaveBeenCalled();
+  });
+
   it("passes reset reason when handling /new and /reset", async () => {
     const loadHistory = vi.fn().mockResolvedValue(undefined);
     const { handleCommand, resetSession } = createHarness({ loadHistory });

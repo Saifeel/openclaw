@@ -108,3 +108,41 @@ curl -sS http://127.0.0.1:18789/tools/invoke \
     "args": {}
   }'
 ```
+
+## Optional Research Relay Endpoint
+
+For a strict VPS relay model, the Gateway can expose a narrow research submission surface that forwards to a private/local worker service.
+
+- `POST /research/submit`
+- `GET /research/status/:job_id`
+- `GET /research/health`
+
+This relay is disabled by default and does not run research itself.
+
+Environment variables:
+
+- `RESEARCH_RELAY_ENABLED=false`
+- `RESEARCH_UPSTREAM_URL=`
+- `RESEARCH_SHARED_TOKEN=`
+- `RESEARCH_REQUEST_TIMEOUT_SEC=15`
+- `RESEARCH_MAX_TOPIC_LEN=500`
+- `RESEARCH_MAX_LABEL_LEN=100`
+
+Safety notes:
+
+- Keep `RESEARCH_UPSTREAM_URL` on loopback/private IPs or Tailscale (`*.ts.net`).
+- Keep heavy work on your local worker: search, scraping, extraction, embeddings, vector storage, and final report generation.
+- When `RESEARCH_SHARED_TOKEN` is set, callers must provide it in `x-openclaw-research-token` in addition to normal Gateway bearer auth.
+
+Example:
+
+```bash
+curl -sS http://127.0.0.1:18789/research/submit \
+  -H 'Authorization: Bearer YOUR_GATEWAY_TOKEN' \
+  -H 'x-openclaw-research-token: YOUR_RELAY_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "topic": "portable dog water bottle market",
+    "label": "market-scan"
+  }'
+```

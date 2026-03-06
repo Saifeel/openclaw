@@ -31,5 +31,6 @@ describe("helpText", () => {
     const output = helpText();
     expect(output).toContain("/elevated <on|off|ask|full>");
     expect(output).toContain("/elev <on|off|ask|full>");
+    expect(output).toContain("/research [--label <label>] <topic>");
   });
 });

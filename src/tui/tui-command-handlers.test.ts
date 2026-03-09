@@ -128,6 +128,41 @@ describe("tui command handlers", () => {
     expect(sendChat).not.toHaveBeenCalled();
   });
 
+  it("routes /research-result to gateway send with the full slash command", async () => {
+    const { handleCommand, sendChat, addUser } = createHarness();
+
+    await handleCommand("/research-result job_123");
+
+    expect(addUser).toHaveBeenCalledWith("/research-result job_123");
+    expect(sendChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "/research-result job_123",
+      }),
+    );
+  });
+
+  it("shows /research-result usage when job_id is missing", async () => {
+    const { handleCommand, sendChat, addSystem } = createHarness();
+
+    await handleCommand("/research-result");
+
+    expect(addSystem).toHaveBeenCalledWith("usage: /research-result <job_id>");
+    expect(sendChat).not.toHaveBeenCalled();
+  });
+
+  it("routes /research-jobs to gateway send", async () => {
+    const { handleCommand, sendChat, addUser } = createHarness();
+
+    await handleCommand("/research-jobs 10");
+
+    expect(addUser).toHaveBeenCalledWith("/research-jobs 10");
+    expect(sendChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "/research-jobs 10",
+      }),
+    );
+  });
+
   it("passes reset reason when handling /new and /reset", async () => {
     const loadHistory = vi.fn().mockResolvedValue(undefined);
     const { handleCommand, resetSession } = createHarness({ loadHistory });

@@ -139,6 +139,8 @@ export function helpText(options: SlashCommandOptions = {}): string {
     "/commands",
     "/status",
     "/research [--label <label>] <topic>",
+    "/research-result <job_id>",
+    "/research-jobs [limit]",
     "/agent <id> (or /agents)",
     "/session <key> (or /sessions)",
     "/model <provider/model> (or /models)",

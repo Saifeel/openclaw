@@ -189,6 +189,36 @@ function buildChatCommands(): ChatCommandDefinition[] {
       ],
     }),
     defineChatCommand({
+      key: "research-result",
+      nativeName: "research-result",
+      description: "Fetch summary and run info for a relayed research job.",
+      textAlias: "/research-result",
+      category: "tools",
+      args: [
+        {
+          name: "job_id",
+          description: "Research job id",
+          type: "string",
+          required: true,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "research-jobs",
+      nativeName: "research-jobs",
+      description: "List recent relayed research runs.",
+      textAlias: "/research-jobs",
+      category: "tools",
+      args: [
+        {
+          name: "limit",
+          description: "Optional max rows (1-100)",
+          type: "string",
+          required: false,
+        },
+      ],
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",

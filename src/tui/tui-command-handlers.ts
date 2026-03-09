@@ -272,6 +272,16 @@ export function createCommandHandlers(context: CommandHandlerContext) {
         }
         await sendMessage(`/research ${args}`);
         break;
+      case "research-result":
+        if (!args) {
+          chatLog.addSystem("usage: /research-result <job_id>");
+          break;
+        }
+        await sendMessage(`/research-result ${args}`);
+        break;
+      case "research-jobs":
+        await sendMessage(args ? `/research-jobs ${args}` : "/research-jobs");
+        break;
       case "agent":
         if (!args) {
           await openAgentSelector();

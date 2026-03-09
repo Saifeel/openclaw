@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
@@ -22,6 +23,9 @@ const MIN_TIMEOUT_SEC = 1;
 const MAX_TIMEOUT_SEC = 120;
 const MAX_BODY_BYTES = 32 * 1024;
 const MAX_JOB_ID_LEN = 160;
+const RESEARCH_PATH_PREFIX = "/research/";
+const RESULT_CACHE_TTL_MS = 30_000;
+const JOBS_CACHE_TTL_MS = 30_000;
 
 type ResearchRelayConfig = {
   enabled: boolean;
@@ -40,7 +44,71 @@ type SubmitPayload = {
 
 type UpstreamRequestResult =
   | { ok: true; statusCode: number; body: unknown; textBody: string }
-  | { ok: false; statusCode: number; error: string };
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      upstreamStatusCode?: number;
+      retryAfterSec?: number;
+    };
+
+type RelayCounterKey = "client.401" | "client.429" | "client.5xx" | "upstream.429" | "upstream.5xx";
+
+const relayCounters: Record<RelayCounterKey, number> = {
+  "client.401": 0,
+  "client.429": 0,
+  "client.5xx": 0,
+  "upstream.429": 0,
+  "upstream.5xx": 0,
+};
+
+type CacheEntry<T> = {
+  expiresAtMs: number;
+  value: T;
+};
+
+const resultCache = new Map<string, CacheEntry<ResearchRelayResultFetchResult>>();
+const jobsCache = new Map<string, CacheEntry<ResearchRelayJobsFetchResult>>();
+
+function readCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) {
+    return undefined;
+  }
+  if (Date.now() > entry.expiresAtMs) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function writeCached<T>(
+  cache: Map<string, CacheEntry<T>>,
+  key: string,
+  value: T,
+  ttlMs: number,
+): void {
+  cache.set(key, {
+    expiresAtMs: Date.now() + ttlMs,
+    value,
+  });
+}
+
+function resolveRequestId(req: IncomingMessage): string {
+  const headerValue = req.headers["x-request-id"];
+  if (typeof headerValue === "string" && headerValue.trim()) {
+    return headerValue.trim().slice(0, 64);
+  }
+  const fallback = randomUUID();
+  return fallback.slice(0, 12);
+}
+
+function applyRetryAfterHeader(res: ServerResponse, retryAfterSec: number | undefined): void {
+  if (!retryAfterSec || retryAfterSec <= 0) {
+    return;
+  }
+  res.setHeader("Retry-After", String(Math.ceil(retryAfterSec)));
+}
 
 export type ResearchRelaySubmitResult =
   | { ok: true; jobId: string; status: string }
@@ -49,12 +117,69 @@ export type ResearchRelaySubmitResult =
       statusCode: number;
       error: string;
       reason: "disabled" | "misconfigured" | "invalid_payload" | "upstream_error";
+      retryAfterSec?: number;
     };
+
+export type ResearchRelayResultFetchResult =
+  | {
+      ok: true;
+      jobId: string;
+      status: string;
+      summary?: string;
+      run: Record<string, unknown>;
+      raw: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason: "disabled" | "misconfigured" | "invalid_job_id" | "upstream_error";
+      retryAfterSec?: number;
+    };
+
+export type ResearchRelayJobsFetchResult =
+  | {
+      ok: true;
+      jobs: Array<Record<string, unknown>>;
+      raw: unknown;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason: "disabled" | "misconfigured" | "invalid_limit" | "upstream_error";
+      retryAfterSec?: number;
+    };
+
+function incrementRelayCounter(
+  key: RelayCounterKey,
+  params: { route: string; statusCode: number; detail?: string },
+): void {
+  relayCounters[key] += 1;
+  log.info(
+    `research relay counter key=${key} count=${relayCounters[key]} route=${params.route} status=${params.statusCode}${params.detail ? ` detail=${params.detail}` : ""}`,
+  );
+}
+
+function observeClientStatus(params: { statusCode: number; route: string; detail?: string }): void {
+  if (params.statusCode === 401) {
+    incrementRelayCounter("client.401", params);
+    return;
+  }
+  if (params.statusCode === 429) {
+    incrementRelayCounter("client.429", params);
+    return;
+  }
+  if (params.statusCode >= 500) {
+    incrementRelayCounter("client.5xx", params);
+  }
+}
 
 async function submitResearchRelayJobWithConfig(params: {
   topic: string;
   label?: string;
   config: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
 }): Promise<ResearchRelaySubmitResult> {
   const payload = normalizeSubmitPayload({
     body: { topic: params.topic, ...(params.label ? { label: params.label } : {}) },
@@ -77,6 +202,8 @@ async function submitResearchRelayJobWithConfig(params: {
     body: payload.value,
     timeoutMs: params.config.requestTimeoutMs,
     sharedToken: params.config.sharedToken,
+    routeTag: "/research/submit",
+    requestId: params.requestId,
   });
   if (!result.ok) {
     return {
@@ -84,6 +211,7 @@ async function submitResearchRelayJobWithConfig(params: {
       statusCode: result.statusCode,
       error: result.error,
       reason: "upstream_error",
+      retryAfterSec: result.retryAfterSec,
     };
   }
 
@@ -274,7 +402,9 @@ function resolveSharedTokenFromRequest(req: IncomingMessage): string | undefined
 function requireSharedToken(req: IncomingMessage, res: ServerResponse, token: string): boolean {
   const requestToken = resolveSharedTokenFromRequest(req);
   if (!requestToken || !safeEqualSecret(requestToken, token)) {
-    sendJson(res, 401, { ok: false, error: "Unauthorized" });
+    const statusCode = 401;
+    sendJson(res, statusCode, { ok: false, error: "Unauthorized" });
+    observeClientStatus({ statusCode, route: "/research/*", detail: "shared_token" });
     return false;
   }
   return true;
@@ -331,13 +461,167 @@ function normalizeJobId(jobId: string): string | undefined {
   return value;
 }
 
+function normalizeJobsLimit(limit: number | undefined): number | undefined {
+  if (limit == null) {
+    return undefined;
+  }
+  if (!Number.isFinite(limit)) {
+    return undefined;
+  }
+  const normalized = Math.floor(limit);
+  if (normalized < 1 || normalized > 100) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readPath(root: Record<string, unknown>, path: string[]): unknown {
+  let cursor: unknown = root;
+  for (const segment of path) {
+    if (!isObjectRecord(cursor)) {
+      return undefined;
+    }
+    cursor = cursor[segment];
+  }
+  return cursor;
+}
+
+function readFirstString(root: Record<string, unknown>, paths: string[][]): string | undefined {
+  for (const path of paths) {
+    const value = readString(readPath(root, path));
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readFirstValue(root: Record<string, unknown>, paths: string[][]): unknown {
+  for (const path of paths) {
+    const value = readPath(root, path);
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function normalizeResultResponse(params: { jobId: string; body: unknown }): {
+  body: Record<string, unknown>;
+  normalized: {
+    jobId: string;
+    status: string;
+    summary?: string;
+    run: Record<string, unknown>;
+    raw: Record<string, unknown>;
+  };
+} {
+  const rawBody = isObjectRecord(params.body) ? params.body : {};
+  const response: Record<string, unknown> = isObjectRecord(params.body) ? { ...params.body } : {};
+  const jobId =
+    readFirstString(rawBody, [["job_id"], ["jobId"], ["id"]]) ??
+    readFirstString(rawBody, [
+      ["run", "job_id"],
+      ["run", "jobId"],
+      ["run", "id"],
+    ]) ??
+    params.jobId;
+  const status =
+    readFirstString(rawBody, [["status"], ["run", "status"], ["state"]])?.trim() || "unknown";
+  const summary = readFirstString(rawBody, [
+    ["summary"],
+    ["report_summary"],
+    ["final_summary"],
+    ["result", "summary"],
+    ["report", "summary"],
+    ["output", "summary"],
+  ]);
+
+  const run: Record<string, unknown> = {};
+  const runFieldPaths: Array<{ key: string; paths: string[][] }> = [
+    { key: "topic", paths: [["topic"], ["run", "topic"], ["request", "topic"]] },
+    { key: "label", paths: [["label"], ["run", "label"], ["request", "label"]] },
+    {
+      key: "submitted_at",
+      paths: [["submitted_at"], ["submittedAt"], ["created_at"], ["run", "submitted_at"]],
+    },
+    { key: "started_at", paths: [["started_at"], ["startedAt"], ["run", "started_at"]] },
+    {
+      key: "completed_at",
+      paths: [["completed_at"], ["completedAt"], ["finished_at"], ["run", "completed_at"]],
+    },
+    {
+      key: "duration_sec",
+      paths: [["duration_sec"], ["durationSeconds"], ["run", "duration_sec"]],
+    },
+    { key: "report_path", paths: [["report_path"], ["reportPath"], ["artifact_path"]] },
+    { key: "progress", paths: [["progress"], ["run", "progress"]] },
+    { key: "phase", paths: [["phase"], ["run", "phase"]] },
+    { key: "error", paths: [["error"], ["run", "error"]] },
+    { key: "current_question", paths: [["current_question"], ["run", "current_question"]] },
+    { key: "current_source", paths: [["current_source"], ["run", "current_source"]] },
+  ];
+  for (const field of runFieldPaths) {
+    const value = readFirstValue(rawBody, field.paths);
+    if (value !== undefined) {
+      run[field.key] = value;
+    }
+  }
+
+  response.ok = true;
+  if (!("job_id" in response)) {
+    response.job_id = jobId;
+  }
+  if (!("status" in response)) {
+    response.status = status;
+  }
+  if (summary && !("summary" in response)) {
+    response.summary = summary;
+  }
+  if (Object.keys(run).length > 0 && !("run" in response)) {
+    response.run = run;
+  }
+
+  return {
+    body: response,
+    normalized: {
+      jobId,
+      status,
+      summary,
+      run,
+      raw: rawBody,
+    },
+  };
+}
+
+function normalizeJobsResponse(body: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(body)) {
+    return body.filter(isObjectRecord);
+  }
+  if (!isObjectRecord(body)) {
+    return [];
+  }
+  const jobs = body.jobs;
+  if (!Array.isArray(jobs)) {
+    return [];
+  }
+  return jobs.filter(isObjectRecord);
+}
+
 async function requestUpstream(params: {
   target: URL;
   method: "GET" | "POST";
   body?: unknown;
   timeoutMs: number;
   sharedToken?: string;
+  routeTag: string;
+  requestId?: string;
 }): Promise<UpstreamRequestResult> {
+  const startedAt = Date.now();
   const headers = new Headers();
   if (params.body !== undefined) {
     headers.set("content-type", "application/json");
@@ -355,7 +639,11 @@ async function requestUpstream(params: {
       signal: AbortSignal.timeout(params.timeoutMs),
     });
   } catch (error) {
+    const durationMs = Math.max(0, Date.now() - startedAt);
     const message = error instanceof Error ? error.message : String(error);
+    log.warn(
+      `research relay upstream requestId=${params.requestId ?? "-"} route=${params.routeTag} method=${params.method} status=error durationMs=${durationMs} error=${message}`,
+    );
     if (
       error instanceof DOMException &&
       (error.name === "TimeoutError" || error.name === "AbortError")
@@ -369,6 +657,10 @@ async function requestUpstream(params: {
   }
 
   const textBody = await response.text();
+  const durationMs = Math.max(0, Date.now() - startedAt);
+  log.info(
+    `research relay upstream requestId=${params.requestId ?? "-"} route=${params.routeTag} method=${params.method} status=${response.status} durationMs=${durationMs}`,
+  );
   let body: unknown = undefined;
   if (textBody.trim().length > 0) {
     try {
@@ -379,6 +671,17 @@ async function requestUpstream(params: {
   }
 
   if (!response.ok) {
+    if (response.status === 429) {
+      incrementRelayCounter("upstream.429", {
+        route: params.routeTag,
+        statusCode: response.status,
+      });
+    } else if (response.status >= 500) {
+      incrementRelayCounter("upstream.5xx", {
+        route: params.routeTag,
+        statusCode: response.status,
+      });
+    }
     const upstreamMessage =
       body &&
       typeof body === "object" &&
@@ -390,6 +693,11 @@ async function requestUpstream(params: {
       ok: false,
       statusCode: 502,
       error: upstreamMessage || `Research upstream returned HTTP ${response.status}.`,
+      upstreamStatusCode: response.status,
+      retryAfterSec:
+        response.status === 429
+          ? parseRetryAfterSeconds(response.headers.get("retry-after"))
+          : undefined,
     };
   }
 
@@ -399,6 +707,29 @@ async function requestUpstream(params: {
     body,
     textBody,
   };
+}
+
+function parseRetryAfterSeconds(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const asInt = Number.parseInt(trimmed, 10);
+  if (Number.isFinite(asInt) && asInt > 0) {
+    return asInt;
+  }
+  const asDate = Date.parse(trimmed);
+  if (!Number.isFinite(asDate)) {
+    return undefined;
+  }
+  const deltaMs = asDate - Date.now();
+  if (deltaMs <= 0) {
+    return undefined;
+  }
+  return Math.ceil(deltaMs / 1000);
 }
 
 function sendRelayDisabled(res: ServerResponse): void {
@@ -453,6 +784,7 @@ async function handleResearchSubmit(params: {
   req: IncomingMessage;
   res: ServerResponse;
   config: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId: string;
 }) {
   if (params.req.method !== "POST") {
     sendMethodNotAllowed(params.res, "POST");
@@ -476,6 +808,7 @@ async function handleResearchSubmit(params: {
     topic: payload.value.topic,
     label: payload.value.label,
     config: params.config,
+    requestId: params.requestId,
   });
   if (!submitResult.ok) {
     if (submitResult.reason === "invalid_payload") {
@@ -483,13 +816,27 @@ async function handleResearchSubmit(params: {
       return true;
     }
     if (submitResult.reason === "misconfigured") {
-      sendJson(params.res, 503, { ok: false, error: submitResult.error });
+      const statusCode = 503;
+      sendJson(params.res, statusCode, { ok: false, error: submitResult.error });
+      observeClientStatus({
+        statusCode,
+        route: "/research/submit",
+        detail: "misconfigured",
+      });
       return true;
     }
-    log.warn(`research submit upstream error: ${submitResult.error}`);
+    log.warn(`research submit requestId=${params.requestId} upstream error: ${submitResult.error}`);
+    applyRetryAfterHeader(params.res, submitResult.retryAfterSec);
     sendJson(params.res, submitResult.statusCode, { ok: false, error: submitResult.error });
+    observeClientStatus({
+      statusCode: submitResult.statusCode,
+      route: "/research/submit",
+      detail: "upstream_error",
+    });
     return true;
   }
+
+  jobsCache.clear();
 
   sendJson(params.res, 200, {
     ok: true,
@@ -504,6 +851,7 @@ export async function submitResearchRelayJob(params: {
   label?: string;
   env?: NodeJS.ProcessEnv;
   config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
 }): Promise<ResearchRelaySubmitResult> {
   const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
   if (!config.enabled) {
@@ -528,14 +876,220 @@ export async function submitResearchRelayJob(params: {
     topic: params.topic,
     label: params.label,
     config: enabledConfig,
+    requestId: params.requestId,
   });
+}
+
+export async function fetchResearchRelayResult(params: {
+  jobId: string;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayResultFetchResult> {
+  const jobId = normalizeJobId(params.jobId);
+  if (!jobId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid job_id.",
+      reason: "invalid_job_id",
+    };
+  }
+
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  if (!config.enabled) {
+    return {
+      ok: false,
+      statusCode: 404,
+      error: "Research relay is disabled.",
+      reason: "disabled",
+    };
+  }
+  if (!config.upstreamUrl || config.configError) {
+    return {
+      ok: false,
+      statusCode: 503,
+      error: "Research relay is misconfigured.",
+      reason: "misconfigured",
+    };
+  }
+  const enabledConfig = config as ResearchRelayConfig & { upstreamUrl: URL };
+  const resultCacheKey = `${enabledConfig.upstreamUrl.toString()}::${jobId}`;
+  const cachedResult = readCached(resultCache, resultCacheKey);
+  if (cachedResult) {
+    return cachedResult;
+  }
+  const fetchFrom = async (
+    upstreamPath: string,
+    routeTag: string,
+  ): Promise<
+    | { ok: true; normalized: ReturnType<typeof normalizeResultResponse>["normalized"] }
+    | {
+        ok: false;
+        statusCode: number;
+        error: string;
+        upstreamStatusCode?: number;
+        retryAfterSec?: number;
+      }
+  > => {
+    const target = buildUpstreamUrl(enabledConfig.upstreamUrl, upstreamPath);
+    const result = await requestUpstream({
+      target,
+      method: "GET",
+      timeoutMs: enabledConfig.requestTimeoutMs,
+      sharedToken: enabledConfig.sharedToken,
+      routeTag,
+      requestId: params.requestId,
+    });
+    if (!result.ok) {
+      return {
+        ok: false,
+        statusCode: result.statusCode,
+        error: result.error,
+        upstreamStatusCode: result.upstreamStatusCode,
+        retryAfterSec: result.retryAfterSec,
+      };
+    }
+    return {
+      ok: true,
+      normalized: normalizeResultResponse({
+        jobId,
+        body: result.body,
+      }).normalized,
+    };
+  };
+
+  // Preferred path for completed report payloads.
+  const primary = await fetchFrom(
+    `/research/result/${encodeURIComponent(jobId)}`,
+    "/research/result/:job_id",
+  );
+  if (!primary.ok) {
+    // Backward-compatible fallback for workers that only expose /research/status/:job_id.
+    if (primary.upstreamStatusCode !== 404) {
+      return {
+        ok: false,
+        statusCode: primary.statusCode,
+        error: primary.error,
+        reason: "upstream_error",
+        retryAfterSec: primary.retryAfterSec,
+      };
+    }
+    const fallback = await fetchFrom(
+      `/research/status/${encodeURIComponent(jobId)}`,
+      "/research/status/:job_id",
+    );
+    if (!fallback.ok) {
+      return {
+        ok: false,
+        statusCode: fallback.statusCode,
+        error: fallback.error,
+        reason: "upstream_error",
+        retryAfterSec: fallback.retryAfterSec,
+      };
+    }
+    const response: ResearchRelayResultFetchResult = {
+      ok: true,
+      jobId: fallback.normalized.jobId,
+      status: fallback.normalized.status,
+      summary: fallback.normalized.summary,
+      run: fallback.normalized.run,
+      raw: fallback.normalized.raw,
+    };
+    writeCached(resultCache, resultCacheKey, response, RESULT_CACHE_TTL_MS);
+    return response;
+  }
+
+  const response: ResearchRelayResultFetchResult = {
+    ok: true,
+    jobId: primary.normalized.jobId,
+    status: primary.normalized.status,
+    summary: primary.normalized.summary,
+    run: primary.normalized.run,
+    raw: primary.normalized.raw,
+  };
+  writeCached(resultCache, resultCacheKey, response, RESULT_CACHE_TTL_MS);
+  return response;
+}
+
+export async function fetchResearchRelayJobs(params: {
+  limit?: number;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayJobsFetchResult> {
+  const limit = normalizeJobsLimit(params.limit);
+  if (params.limit != null && limit == null) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid jobs limit. Use 1-100.",
+      reason: "invalid_limit",
+    };
+  }
+
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  if (!config.enabled) {
+    return {
+      ok: false,
+      statusCode: 404,
+      error: "Research relay is disabled.",
+      reason: "disabled",
+    };
+  }
+  if (!config.upstreamUrl || config.configError) {
+    return {
+      ok: false,
+      statusCode: 503,
+      error: "Research relay is misconfigured.",
+      reason: "misconfigured",
+    };
+  }
+  const enabledConfig = config as ResearchRelayConfig & { upstreamUrl: URL };
+  const jobsLimitKey = limit == null ? "all" : String(limit);
+  const jobsCacheKey = `${enabledConfig.upstreamUrl.toString()}::${jobsLimitKey}`;
+  const cachedJobs = readCached(jobsCache, jobsCacheKey);
+  if (cachedJobs) {
+    return cachedJobs;
+  }
+  const target = buildUpstreamUrl(enabledConfig.upstreamUrl, "/research/jobs");
+  if (limit != null) {
+    target.searchParams.set("limit", String(limit));
+  }
+  const result = await requestUpstream({
+    target,
+    method: "GET",
+    timeoutMs: enabledConfig.requestTimeoutMs,
+    sharedToken: enabledConfig.sharedToken,
+    routeTag: "/research/jobs",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      statusCode: result.statusCode,
+      error: result.error,
+      reason: "upstream_error",
+      retryAfterSec: result.retryAfterSec,
+    };
+  }
+
+  const response: ResearchRelayJobsFetchResult = {
+    ok: true,
+    jobs: normalizeJobsResponse(result.body),
+    raw: result.body,
+  };
+  writeCached(jobsCache, jobsCacheKey, response, JOBS_CACHE_TTL_MS);
+  return response;
 }
 
 async function handleResearchHealthOrStatus(params: {
   req: IncomingMessage;
   res: ServerResponse;
   requestPath: string;
+  requestSearch: string;
   config: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId: string;
 }) {
   if (params.req.method !== "GET") {
     sendMethodNotAllowed(params.res, "GET");
@@ -549,10 +1103,18 @@ async function handleResearchHealthOrStatus(params: {
       method: "GET",
       timeoutMs: params.config.requestTimeoutMs,
       sharedToken: params.config.sharedToken,
+      routeTag: "/research/health",
+      requestId: params.requestId,
     });
     if (!result.ok) {
-      log.warn(`research health upstream error: ${result.error}`);
+      log.warn(`research health requestId=${params.requestId} upstream error: ${result.error}`);
+      applyRetryAfterHeader(params.res, result.retryAfterSec);
       sendJson(params.res, result.statusCode, { ok: false, error: result.error });
+      observeClientStatus({
+        statusCode: result.statusCode,
+        route: "/research/health",
+        detail: "upstream_error",
+      });
       return true;
     }
     if (result.body && typeof result.body === "object" && !Array.isArray(result.body)) {
@@ -563,35 +1125,110 @@ async function handleResearchHealthOrStatus(params: {
     return true;
   }
 
+  if (params.requestPath === "/research/jobs") {
+    const query = new URLSearchParams(params.requestSearch);
+    const rawLimit = query.get("limit");
+    const parsedLimit =
+      rawLimit == null || rawLimit.trim().length === 0 ? undefined : Number.parseInt(rawLimit, 10);
+    const limit = normalizeJobsLimit(parsedLimit);
+    if (parsedLimit != null && limit == null) {
+      sendInvalidRequest(params.res, "Invalid jobs limit. Use 1-100.");
+      return true;
+    }
+    const jobs = await fetchResearchRelayJobs({
+      limit,
+      config: params.config,
+      requestId: params.requestId,
+    });
+    if (!jobs.ok) {
+      log.warn(`research jobs requestId=${params.requestId} upstream error: ${jobs.error}`);
+      applyRetryAfterHeader(params.res, jobs.retryAfterSec);
+      sendJson(params.res, jobs.statusCode, { ok: false, error: jobs.error });
+      observeClientStatus({
+        statusCode: jobs.statusCode,
+        route: "/research/jobs",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    if (isObjectRecord(jobs.raw)) {
+      sendJson(params.res, 200, jobs.raw);
+      return true;
+    }
+    sendJson(params.res, 200, { ok: true, jobs: jobs.jobs });
+    return true;
+  }
+
   const statusPrefix = "/research/status/";
-  if (!params.requestPath.startsWith(statusPrefix)) {
+  if (params.requestPath.startsWith(statusPrefix)) {
+    const jobId = normalizeJobId(decodeURIComponent(params.requestPath.slice(statusPrefix.length)));
+    if (!jobId) {
+      sendInvalidRequest(params.res, "Invalid job_id in path.");
+      return true;
+    }
+    const target = buildUpstreamUrl(
+      params.config.upstreamUrl,
+      `/research/status/${encodeURIComponent(jobId)}`,
+    );
+    const result = await requestUpstream({
+      target,
+      method: "GET",
+      timeoutMs: params.config.requestTimeoutMs,
+      sharedToken: params.config.sharedToken,
+      routeTag: "/research/status/:job_id",
+      requestId: params.requestId,
+    });
+    if (!result.ok) {
+      log.warn(`research status requestId=${params.requestId} upstream error: ${result.error}`);
+      applyRetryAfterHeader(params.res, result.retryAfterSec);
+      sendJson(params.res, result.statusCode, { ok: false, error: result.error });
+      observeClientStatus({
+        statusCode: result.statusCode,
+        route: "/research/status/:job_id",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    if (result.body && typeof result.body === "object" && !Array.isArray(result.body)) {
+      sendJson(params.res, 200, result.body);
+      return true;
+    }
+    sendJson(params.res, 200, { ok: true, job_id: jobId, status: "unknown" });
+    return true;
+  }
+
+  const resultPrefix = "/research/result/";
+  if (!params.requestPath.startsWith(resultPrefix)) {
     return false;
   }
-  const jobId = normalizeJobId(decodeURIComponent(params.requestPath.slice(statusPrefix.length)));
+  const jobId = normalizeJobId(decodeURIComponent(params.requestPath.slice(resultPrefix.length)));
   if (!jobId) {
     sendInvalidRequest(params.res, "Invalid job_id in path.");
     return true;
   }
-  const target = buildUpstreamUrl(
-    params.config.upstreamUrl,
-    `/research/status/${encodeURIComponent(jobId)}`,
-  );
-  const result = await requestUpstream({
-    target,
-    method: "GET",
-    timeoutMs: params.config.requestTimeoutMs,
-    sharedToken: params.config.sharedToken,
+
+  const resultFetch = await fetchResearchRelayResult({
+    jobId,
+    config: params.config,
+    requestId: params.requestId,
   });
-  if (!result.ok) {
-    log.warn(`research status upstream error: ${result.error}`);
-    sendJson(params.res, result.statusCode, { ok: false, error: result.error });
+  if (!resultFetch.ok) {
+    log.warn(`research result requestId=${params.requestId} upstream error: ${resultFetch.error}`);
+    applyRetryAfterHeader(params.res, resultFetch.retryAfterSec);
+    sendJson(params.res, resultFetch.statusCode, { ok: false, error: resultFetch.error });
+    observeClientStatus({
+      statusCode: resultFetch.statusCode,
+      route: "/research/result/:job_id",
+      detail: "upstream_error",
+    });
     return true;
   }
-  if (result.body && typeof result.body === "object" && !Array.isArray(result.body)) {
-    sendJson(params.res, 200, result.body);
-    return true;
-  }
-  sendJson(params.res, 200, { ok: true, job_id: jobId, status: "unknown" });
+
+  const response = normalizeResultResponse({
+    jobId: resultFetch.jobId,
+    body: resultFetch.raw,
+  }).body;
+  sendJson(params.res, 200, response);
   return true;
 }
 
@@ -606,16 +1243,28 @@ export async function handleResearchRelayHttpRequest(
     env?: NodeJS.ProcessEnv;
   },
 ): Promise<boolean> {
-  const requestPath = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).pathname;
+  const requestUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  const requestPath = requestUrl.pathname;
+  const requestId = resolveRequestId(req);
+  res.setHeader("x-openclaw-request-id", requestId);
   const isSubmit = requestPath === "/research/submit";
   const isHealth = requestPath === "/research/health";
+  const isJobs = requestPath === "/research/jobs";
   const isStatus = requestPath.startsWith("/research/status/");
-  if (!isSubmit && !isHealth && !isStatus) {
+  const isResult = requestPath.startsWith("/research/result/");
+  const isResearchPrefixed =
+    requestPath === "/research" || requestPath.startsWith(RESEARCH_PATH_PREFIX);
+  if (!isSubmit && !isHealth && !isJobs && !isStatus && !isResult && isResearchPrefixed) {
+    sendJson(res, 404, { ok: false, error: "Not Found" });
+    return true;
+  }
+  if (!isSubmit && !isHealth && !isJobs && !isStatus && !isResult) {
     return false;
   }
 
   const config = resolveResearchRelayConfig(opts.env ?? process.env);
   if (!ensureEnabledOrReply({ res, config })) {
+    log.warn(`research relay requestId=${requestId} rejected: disabled or misconfigured`);
     return true;
   }
   const enabledConfig = config as ResearchRelayConfig & { upstreamUrl: URL };
@@ -630,13 +1279,21 @@ export async function handleResearchRelayHttpRequest(
     sharedToken: enabledConfig.sharedToken,
   });
   if (!authorized) {
+    log.warn(`research relay requestId=${requestId} rejected: unauthorized`);
     return true;
   }
 
   if (isSubmit) {
-    return await handleResearchSubmit({ req, res, config: enabledConfig });
+    return await handleResearchSubmit({ req, res, config: enabledConfig, requestId });
   }
-  return await handleResearchHealthOrStatus({ req, res, requestPath, config: enabledConfig });
+  return await handleResearchHealthOrStatus({
+    req,
+    res,
+    requestPath,
+    requestSearch: requestUrl.search,
+    config: enabledConfig,
+    requestId,
+  });
 }
 
 export const researchRelayTesting = {

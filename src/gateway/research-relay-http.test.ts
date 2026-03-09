@@ -164,6 +164,7 @@ describe("research relay HTTP endpoints", () => {
     const restoreEnv = applyRelayEnv({
       RESEARCH_RELAY_ENABLED: "true",
       RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
     });
     try {
       await withTempConfig({
@@ -303,7 +304,7 @@ describe("research relay HTTP endpoints", () => {
     }
   });
 
-  it("forwards submit/status/health to configured upstream path and returns compact receipts", async () => {
+  it("forwards submit/status/health/jobs/result to configured upstream path and returns compact receipts", async () => {
     const seen = {
       submitBody: undefined as unknown,
       sharedHeader: "",
@@ -328,6 +329,42 @@ describe("research relay HTTP endpoints", () => {
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ ok: true, status: "healthy" }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/worker/research/jobs?limit=2") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            jobs: [
+              {
+                job_id: "abc123",
+                status: "completed",
+                topic: "portable dog water bottle market",
+                label: "market-scan",
+                duration_sec: 720,
+              },
+            ],
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && req.url === "/worker/research/result/abc123") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "abc123",
+            status: "completed",
+            summary: "Portable bottle market is growing in the premium segment.",
+            started_at: "2026-03-07T01:00:00Z",
+            completed_at: "2026-03-07T01:12:00Z",
+            duration_sec: 720,
+            label: "market-scan",
+          }),
+        );
         return;
       }
       res.statusCode = 404;
@@ -380,6 +417,48 @@ describe("research relay HTTP endpoints", () => {
             });
             expect(health.status).toBe(200);
             expect(await health.json()).toEqual({ ok: true, status: "healthy" });
+
+            const jobs = await getJson({
+              port,
+              path: "/research/jobs?limit=2",
+              headers,
+            });
+            expect(jobs.status).toBe(200);
+            expect(await jobs.json()).toEqual({
+              ok: true,
+              jobs: [
+                {
+                  job_id: "abc123",
+                  status: "completed",
+                  topic: "portable dog water bottle market",
+                  label: "market-scan",
+                  duration_sec: 720,
+                },
+              ],
+            });
+
+            const result = await getJson({
+              port,
+              path: "/research/result/abc123",
+              headers,
+            });
+            expect(result.status).toBe(200);
+            expect(await result.json()).toEqual({
+              ok: true,
+              job_id: "abc123",
+              status: "completed",
+              summary: "Portable bottle market is growing in the premium segment.",
+              started_at: "2026-03-07T01:00:00Z",
+              completed_at: "2026-03-07T01:12:00Z",
+              duration_sec: 720,
+              label: "market-scan",
+              run: {
+                label: "market-scan",
+                started_at: "2026-03-07T01:00:00Z",
+                completed_at: "2026-03-07T01:12:00Z",
+                duration_sec: 720,
+              },
+            });
 
             expect(seen.submitBody).toEqual({
               topic: "portable dog water bottle market",
@@ -463,6 +542,227 @@ describe("research relay HTTP endpoints", () => {
     } finally {
       timeoutRestore();
       await closeServer(hangingUpstream);
+    }
+  });
+
+  it("fails closed for unknown /research/* routes", async () => {
+    const upstream = createServer((_, res) => {
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    const upstreamPort = await listen(upstream);
+
+    const restoreEnv = applyRelayEnv({
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
+    });
+    try {
+      await withTempConfig({
+        prefix: "openclaw-research-relay-unknown-route-",
+        cfg: { gateway: { trustedProxies: [] } },
+        run: async () => {
+          const { server, port } = await startGatewayHttpServer();
+          try {
+            const res = await getJson({
+              port,
+              path: "/research/unknown",
+            });
+            expect(res.status).toBe(404);
+            expect(await res.json()).toEqual({ ok: false, error: "Not Found" });
+          } finally {
+            await closeServer(server);
+          }
+        },
+      });
+    } finally {
+      restoreEnv();
+      await closeServer(upstream);
+    }
+  });
+
+  it("falls back to upstream /research/status when /research/result is not implemented", async () => {
+    const upstream = createServer((req, res) => {
+      if (req.method === "GET" && req.url === "/research/result/job_legacy") {
+        res.statusCode = 404;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Not found" }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/research/status/job_legacy") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "job_legacy",
+            status: "completed",
+            current_question: "What is the TAM?",
+            current_source: {
+              title: "Industry report",
+              url: "https://example.com/report",
+            },
+          }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    const upstreamPort = await listen(upstream);
+
+    const restoreEnv = applyRelayEnv({
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
+    });
+    try {
+      await withTempConfig({
+        prefix: "openclaw-research-relay-result-fallback-",
+        cfg: { gateway: { trustedProxies: [] } },
+        run: async () => {
+          const { server, port } = await startGatewayHttpServer();
+          try {
+            const res = await getJson({
+              port,
+              path: "/research/result/job_legacy",
+              headers: { "x-openclaw-research-token": "relay-shared-token" },
+            });
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({
+              ok: true,
+              job_id: "job_legacy",
+              status: "completed",
+              current_question: "What is the TAM?",
+              current_source: {
+                title: "Industry report",
+                url: "https://example.com/report",
+              },
+              run: {
+                current_question: "What is the TAM?",
+                current_source: {
+                  title: "Industry report",
+                  url: "https://example.com/report",
+                },
+              },
+            });
+          } finally {
+            await closeServer(server);
+          }
+        },
+      });
+    } finally {
+      restoreEnv();
+      await closeServer(upstream);
+    }
+  });
+
+  it("prefers /research/result and falls back to /research/status with summary propagation", async () => {
+    let resultCalls = 0;
+    let statusCalls = 0;
+    const upstream = createServer((req, res) => {
+      if (req.method === "GET" && req.url === "/research/result/job_primary") {
+        resultCalls += 1;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "job_primary",
+            status: "completed",
+            summary: "Primary summary from /research/result",
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && req.url === "/research/status/job_primary") {
+        statusCalls += 1;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "job_primary",
+            status: "completed",
+            summary: "status should not be used for primary",
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && req.url === "/research/result/job_fallback") {
+        resultCalls += 1;
+        res.statusCode = 404;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Not found" }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/research/status/job_fallback") {
+        statusCalls += 1;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "job_fallback",
+            status: "done",
+            summary: "Fallback summary from /research/status",
+          }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    const upstreamPort = await listen(upstream);
+
+    const restoreEnv = applyRelayEnv({
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
+    });
+    try {
+      await withTempConfig({
+        prefix: "openclaw-research-relay-summary-routing-",
+        cfg: { gateway: { trustedProxies: [] } },
+        run: async () => {
+          const { server, port } = await startGatewayHttpServer();
+          try {
+            const primary = await getJson({
+              port,
+              path: "/research/result/job_primary",
+              headers: { "x-openclaw-research-token": "relay-shared-token" },
+            });
+            expect(primary.status).toBe(200);
+            expect(await primary.json()).toEqual({
+              ok: true,
+              job_id: "job_primary",
+              status: "completed",
+              summary: "Primary summary from /research/result",
+            });
+
+            const fallback = await getJson({
+              port,
+              path: "/research/result/job_fallback",
+              headers: { "x-openclaw-research-token": "relay-shared-token" },
+            });
+            expect(fallback.status).toBe(200);
+            expect(await fallback.json()).toEqual({
+              ok: true,
+              job_id: "job_fallback",
+              status: "done",
+              summary: "Fallback summary from /research/status",
+            });
+
+            expect(resultCalls).toBe(2);
+            expect(statusCalls).toBe(1);
+          } finally {
+            await closeServer(server);
+          }
+        },
+      });
+    } finally {
+      restoreEnv();
+      await closeServer(upstream);
     }
   });
 });

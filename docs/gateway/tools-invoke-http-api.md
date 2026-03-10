@@ -124,6 +124,7 @@ Environment variables:
 - `RESEARCH_RELAY_ENABLED=false`
 - `RESEARCH_UPSTREAM_URL=`
 - `RESEARCH_SHARED_TOKEN=`
+- `RESEARCH_ACTOR_ID=jarvis.vps`
 - `RESEARCH_REQUEST_TIMEOUT_SEC=15`
 - `RESEARCH_MAX_TOPIC_LEN=500`
 - `RESEARCH_MAX_LABEL_LEN=100`
@@ -133,6 +134,7 @@ Safety notes:
 - Keep `RESEARCH_UPSTREAM_URL` on loopback/private IPs or Tailscale (`*.ts.net`).
 - Keep heavy work on your local worker: search, scraping, extraction, embeddings, vector storage, and final report generation.
 - When `RESEARCH_SHARED_TOKEN` is set, callers must provide it in `x-openclaw-research-token` in addition to normal Gateway bearer auth.
+- Gateway-side worker controls use `RESEARCH_ACTOR_ID` when sending mutating requests upstream so local audit logs retain stable actor identity.
 
 Example:
 

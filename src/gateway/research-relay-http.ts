@@ -31,6 +31,7 @@ type ResearchRelayConfig = {
   enabled: boolean;
   upstreamUrl?: URL;
   sharedToken?: string;
+  actorId?: string;
   requestTimeoutMs: number;
   maxTopicLen: number;
   maxLabelLen: number;
@@ -151,6 +152,73 @@ export type ResearchRelayJobsFetchResult =
       retryAfterSec?: number;
     };
 
+export type ResearchRelayArtifactsFetchResult =
+  | {
+      ok: true;
+      jobId: string;
+      runId?: string;
+      status?: string;
+      artifacts: Record<string, unknown>;
+      raw: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason: "disabled" | "misconfigured" | "invalid_job_id" | "upstream_error";
+      retryAfterSec?: number;
+    };
+
+export type ResearchRelayExperimentsFetchResult =
+  | {
+      ok: true;
+      experiments: Array<Record<string, unknown>>;
+      raw: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason: "disabled" | "misconfigured" | "invalid_limit" | "upstream_error";
+      retryAfterSec?: number;
+    };
+
+export type ResearchRelayExperimentActionResult =
+  | {
+      ok: true;
+      experiment?: Record<string, unknown>;
+      decision?: string;
+      resultPath?: string;
+      raw: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason:
+        | "disabled"
+        | "misconfigured"
+        | "invalid_experiment_id"
+        | "invalid_payload"
+        | "upstream_error";
+      retryAfterSec?: number;
+    };
+
+export type ResearchRelayChatResult =
+  | {
+      ok: true;
+      model?: string;
+      reply: string;
+      raw: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason: "disabled" | "misconfigured" | "invalid_payload" | "upstream_error";
+      retryAfterSec?: number;
+    };
+
 function incrementRelayCounter(
   key: RelayCounterKey,
   params: { route: string; statusCode: number; detail?: string },
@@ -202,6 +270,7 @@ async function submitResearchRelayJobWithConfig(params: {
     body: payload.value,
     timeoutMs: params.config.requestTimeoutMs,
     sharedToken: params.config.sharedToken,
+    actorId: params.config.actorId,
     routeTag: "/research/submit",
     requestId: params.requestId,
   });
@@ -286,6 +355,7 @@ function isAllowedUpstreamHost(hostname: string): boolean {
 function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): ResearchRelayConfig {
   const enabled = parseBooleanValue(env.RESEARCH_RELAY_ENABLED) === true;
   const sharedToken = readString(env.RESEARCH_SHARED_TOKEN);
+  const actorId = readString(env.RESEARCH_ACTOR_ID) ?? "jarvis.vps";
   const requestTimeoutSec = readPositiveIntWithClamp({
     value: env.RESEARCH_REQUEST_TIMEOUT_SEC,
     fallback: DEFAULT_REQUEST_TIMEOUT_SEC,
@@ -310,6 +380,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     return {
       enabled: false,
       sharedToken,
+      actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
@@ -319,6 +390,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     return {
       enabled: true,
       sharedToken,
+      actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
@@ -333,6 +405,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     return {
       enabled: true,
       sharedToken,
+      actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
@@ -344,6 +417,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     return {
       enabled: true,
       sharedToken,
+      actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
@@ -354,6 +428,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     return {
       enabled: true,
       sharedToken,
+      actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
@@ -364,6 +439,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     return {
       enabled: true,
       sharedToken,
+      actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
@@ -375,6 +451,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     enabled: true,
     upstreamUrl: parsed,
     sharedToken,
+    actorId,
     requestTimeoutMs: requestTimeoutSec * 1_000,
     maxTopicLen,
     maxLabelLen,
@@ -473,6 +550,20 @@ function normalizeJobsLimit(limit: number | undefined): number | undefined {
     return undefined;
   }
   return normalized;
+}
+
+function normalizeExperimentId(experimentId: string): string | undefined {
+  const value = experimentId.trim();
+  if (!value) {
+    return undefined;
+  }
+  if (value.length > MAX_JOB_ID_LEN) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9._:-]+$/.test(value)) {
+    return undefined;
+  }
+  return value;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -618,6 +709,7 @@ async function requestUpstream(params: {
   body?: unknown;
   timeoutMs: number;
   sharedToken?: string;
+  actorId?: string;
   routeTag: string;
   requestId?: string;
 }): Promise<UpstreamRequestResult> {
@@ -628,6 +720,9 @@ async function requestUpstream(params: {
   }
   if (params.sharedToken) {
     headers.set("x-openclaw-research-token", params.sharedToken);
+  }
+  if (params.actorId && params.method === "POST") {
+    headers.set("x-openclaw-actor-id", params.actorId);
   }
 
   let response: Response;
@@ -730,6 +825,45 @@ function parseRetryAfterSeconds(value: string | null): number | undefined {
     return undefined;
   }
   return Math.ceil(deltaMs / 1000);
+}
+
+function resolveEnabledRelayConfig(
+  config: ResearchRelayConfig,
+):
+  | { ok: true; config: ResearchRelayConfig & { upstreamUrl: URL } }
+  | { ok: false; statusCode: number; error: string; reason: "disabled" | "misconfigured" } {
+  if (!config.enabled) {
+    return {
+      ok: false,
+      statusCode: 404,
+      error: "Research relay is disabled.",
+      reason: "disabled",
+    };
+  }
+  if (!config.upstreamUrl || config.configError) {
+    return {
+      ok: false,
+      statusCode: 503,
+      error: "Research relay is misconfigured.",
+      reason: "misconfigured",
+    };
+  }
+  return {
+    ok: true,
+    config: config as ResearchRelayConfig & { upstreamUrl: URL },
+  };
+}
+
+function mapUpstreamFailure(result: Extract<UpstreamRequestResult, { ok: false }>): {
+  statusCode: number;
+  error: string;
+  retryAfterSec?: number;
+} {
+  return {
+    statusCode: result.upstreamStatusCode ?? result.statusCode,
+    error: result.error,
+    retryAfterSec: result.retryAfterSec,
+  };
 }
 
 function sendRelayDisabled(res: ServerResponse): void {
@@ -1081,6 +1215,284 @@ export async function fetchResearchRelayJobs(params: {
   };
   writeCached(jobsCache, jobsCacheKey, response, JOBS_CACHE_TTL_MS);
   return response;
+}
+
+export async function fetchResearchRelayArtifacts(params: {
+  jobId: string;
+  includeText?: boolean;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayArtifactsFetchResult> {
+  const jobId = normalizeJobId(params.jobId);
+  if (!jobId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid job_id.",
+      reason: "invalid_job_id",
+    };
+  }
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  const enabled = resolveEnabledRelayConfig(config);
+  if (!enabled.ok) {
+    return enabled;
+  }
+  const target = buildUpstreamUrl(
+    enabled.config.upstreamUrl,
+    `/research/artifacts/${encodeURIComponent(jobId)}`,
+  );
+  target.searchParams.set("include_text", params.includeText === false ? "false" : "true");
+  const result = await requestUpstream({
+    target,
+    method: "GET",
+    timeoutMs: enabled.config.requestTimeoutMs,
+    sharedToken: enabled.config.sharedToken,
+    routeTag: "/research/artifacts/:job_id",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapUpstreamFailure(result),
+      reason: "upstream_error",
+    };
+  }
+  const raw = isObjectRecord(result.body) ? result.body : {};
+  const artifacts = isObjectRecord(raw.artifacts) ? raw.artifacts : {};
+  return {
+    ok: true,
+    jobId: readFirstString(raw, [["job_id"], ["jobId"], ["id"]]) ?? jobId,
+    runId: readFirstString(raw, [["run_id"], ["runId"]]),
+    status: readFirstString(raw, [["status"], ["state"]]),
+    artifacts,
+    raw,
+  };
+}
+
+export async function fetchResearchRelayExperiments(params: {
+  status?: string;
+  limit?: number;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayExperimentsFetchResult> {
+  const limit = normalizeJobsLimit(params.limit);
+  if (params.limit != null && limit == null) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid experiments limit. Use 1-100.",
+      reason: "invalid_limit",
+    };
+  }
+  const statusFilter = readString(params.status);
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  const enabled = resolveEnabledRelayConfig(config);
+  if (!enabled.ok) {
+    return enabled;
+  }
+  const target = buildUpstreamUrl(enabled.config.upstreamUrl, "/research/experiments");
+  if (limit != null) {
+    target.searchParams.set("limit", String(limit));
+  }
+  if (statusFilter) {
+    target.searchParams.set("status", statusFilter);
+  }
+  const result = await requestUpstream({
+    target,
+    method: "GET",
+    timeoutMs: enabled.config.requestTimeoutMs,
+    sharedToken: enabled.config.sharedToken,
+    routeTag: "/research/experiments",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapUpstreamFailure(result),
+      reason: "upstream_error",
+    };
+  }
+  const raw = isObjectRecord(result.body) ? result.body : {};
+  const experimentsRaw = raw.experiments;
+  const experiments = Array.isArray(experimentsRaw) ? experimentsRaw.filter(isObjectRecord) : [];
+  return {
+    ok: true,
+    experiments,
+    raw,
+  };
+}
+
+export async function decideResearchRelayExperiment(params: {
+  experimentId: string;
+  decision: "approve" | "reject" | "complete";
+  notes?: string;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayExperimentActionResult> {
+  const experimentId = normalizeExperimentId(params.experimentId);
+  if (!experimentId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid experiment_id.",
+      reason: "invalid_experiment_id",
+    };
+  }
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  const enabled = resolveEnabledRelayConfig(config);
+  if (!enabled.ok) {
+    return enabled;
+  }
+  const target = buildUpstreamUrl(
+    enabled.config.upstreamUrl,
+    `/research/experiments/${encodeURIComponent(experimentId)}/decision`,
+  );
+  const result = await requestUpstream({
+    target,
+    method: "POST",
+    body: {
+      decision: params.decision,
+      ...(readString(params.notes) ? { notes: readString(params.notes) } : {}),
+    },
+    timeoutMs: enabled.config.requestTimeoutMs,
+    sharedToken: enabled.config.sharedToken,
+    actorId: enabled.config.actorId,
+    routeTag: "/research/experiments/:experiment_id/decision",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapUpstreamFailure(result),
+      reason: "upstream_error",
+    };
+  }
+  const raw = isObjectRecord(result.body) ? result.body : {};
+  return {
+    ok: true,
+    experiment: isObjectRecord(raw.experiment) ? raw.experiment : undefined,
+    raw,
+  };
+}
+
+export async function executeResearchRelayExperiment(params: {
+  experimentId: string;
+  force?: boolean;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayExperimentActionResult> {
+  const experimentId = normalizeExperimentId(params.experimentId);
+  if (!experimentId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid experiment_id.",
+      reason: "invalid_experiment_id",
+    };
+  }
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  const enabled = resolveEnabledRelayConfig(config);
+  if (!enabled.ok) {
+    return enabled;
+  }
+  const target = buildUpstreamUrl(
+    enabled.config.upstreamUrl,
+    `/research/experiments/${encodeURIComponent(experimentId)}/execute`,
+  );
+  const result = await requestUpstream({
+    target,
+    method: "POST",
+    body: params.force ? { force: true } : {},
+    timeoutMs: enabled.config.requestTimeoutMs,
+    sharedToken: enabled.config.sharedToken,
+    actorId: enabled.config.actorId,
+    routeTag: "/research/experiments/:experiment_id/execute",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapUpstreamFailure(result),
+      reason: "upstream_error",
+    };
+  }
+  const raw = isObjectRecord(result.body) ? result.body : {};
+  return {
+    ok: true,
+    experiment: isObjectRecord(raw.experiment) ? raw.experiment : undefined,
+    decision: readFirstString(raw, [["decision"]]),
+    resultPath: readFirstString(raw, [["result_path"], ["resultPath"]]),
+    raw,
+  };
+}
+
+export async function sendResearchRelayChat(params: {
+  message: string;
+  model?: string;
+  pauseWhenBusy?: boolean;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayChatResult> {
+  const message = readString(params.message);
+  if (!message) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Message is required.",
+      reason: "invalid_payload",
+    };
+  }
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  const enabled = resolveEnabledRelayConfig(config);
+  if (!enabled.ok) {
+    return enabled;
+  }
+  const target = buildUpstreamUrl(enabled.config.upstreamUrl, "/chat/send");
+  const body: Record<string, unknown> = { message };
+  if (readString(params.model)) {
+    body.model = readString(params.model);
+  }
+  if (params.pauseWhenBusy != null) {
+    body.pause_when_busy = params.pauseWhenBusy;
+  }
+  const result = await requestUpstream({
+    target,
+    method: "POST",
+    body,
+    timeoutMs: enabled.config.requestTimeoutMs,
+    sharedToken: enabled.config.sharedToken,
+    actorId: enabled.config.actorId,
+    routeTag: "/chat/send",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapUpstreamFailure(result),
+      reason: "upstream_error",
+    };
+  }
+  const raw = isObjectRecord(result.body) ? result.body : {};
+  const reply = readFirstString(raw, [["reply"], ["message"]]);
+  if (!reply) {
+    return {
+      ok: false,
+      statusCode: 502,
+      error: "Research upstream returned an empty chat reply.",
+      reason: "upstream_error",
+    };
+  }
+  return {
+    ok: true,
+    model: readFirstString(raw, [["model"]]),
+    reply,
+    raw,
+  };
 }
 
 async function handleResearchHealthOrStatus(params: {

@@ -219,6 +219,110 @@ function buildChatCommands(): ChatCommandDefinition[] {
       ],
     }),
     defineChatCommand({
+      key: "research-artifacts",
+      nativeName: "research-artifacts",
+      description: "Fetch the normalized artifact bundle summary for a research job.",
+      textAlias: "/research-artifacts",
+      category: "tools",
+      args: [
+        {
+          name: "job_id",
+          description: "Research job id",
+          type: "string",
+          required: true,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "research-experiments",
+      nativeName: "research-experiments",
+      description: "List relayed research experiments for review.",
+      textAlias: "/research-experiments",
+      category: "tools",
+      args: [
+        {
+          name: "status",
+          description: "Optional experiment status filter",
+          type: "string",
+          required: false,
+        },
+        {
+          name: "limit",
+          description: "Optional max rows (1-100)",
+          type: "string",
+          required: false,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "research-approve",
+      nativeName: "research-approve",
+      description: "Approve a queued research experiment.",
+      textAlias: "/research-approve",
+      category: "tools",
+      args: [
+        {
+          name: "experiment_id",
+          description: "Experiment id",
+          type: "string",
+          required: true,
+        },
+        {
+          name: "notes",
+          description: "Optional approval notes",
+          type: "string",
+          captureRemaining: true,
+          required: false,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "research-execute",
+      nativeName: "research-execute",
+      description: "Execute an approved research experiment.",
+      textAlias: "/research-execute",
+      category: "tools",
+      args: [
+        {
+          name: "experiment_id",
+          description: "Experiment id",
+          type: "string",
+          required: true,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "research-chat",
+      nativeName: "research-chat",
+      description: "Send a chat request to the local worker's model path.",
+      textAlias: "/research-chat",
+      category: "tools",
+      args: [
+        {
+          name: "message",
+          description: "Message for the local worker chat endpoint",
+          type: "string",
+          captureRemaining: true,
+          required: true,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "research-nightly",
+      nativeName: "research-nightly",
+      description: "Build a nightly summary from recent jobs and queued experiments.",
+      textAlias: "/research-nightly",
+      category: "tools",
+      args: [
+        {
+          name: "limit",
+          description: "Optional max jobs to review (1-20)",
+          type: "string",
+          required: false,
+        },
+      ],
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",

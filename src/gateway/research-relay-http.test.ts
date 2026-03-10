@@ -1,6 +1,13 @@
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  decideResearchRelayExperiment,
+  executeResearchRelayExperiment,
+  fetchResearchRelayArtifacts,
+  fetchResearchRelayExperiments,
+  sendResearchRelayChat,
+} from "./research-relay-http.js";
 import { createGatewayHttpServer } from "./server-http.js";
 import { withTempConfig } from "./test-temp-config.js";
 
@@ -9,6 +16,7 @@ const RELAY_ENV_KEYS = [
   "RESEARCH_RELAY_ENABLED",
   "RESEARCH_UPSTREAM_URL",
   "RESEARCH_SHARED_TOKEN",
+  "RESEARCH_ACTOR_ID",
   "RESEARCH_REQUEST_TIMEOUT_SEC",
   "RESEARCH_MAX_TOPIC_LEN",
   "RESEARCH_MAX_LABEL_LEN",
@@ -760,6 +768,189 @@ describe("research relay HTTP endpoints", () => {
           }
         },
       });
+    } finally {
+      restoreEnv();
+      await closeServer(upstream);
+    }
+  });
+
+  it("fetches artifacts and experiments and forwards actor headers on mutating worker actions", async () => {
+    const seen = {
+      decisionActor: "",
+      executeActor: "",
+      chatActor: "",
+    };
+    const upstream = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/research/artifacts/job_art_01?include_text=true") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            schema_version: "artifacts.v1",
+            job_id: "job_art_01",
+            run_id: "run_art_01",
+            status: "done",
+            artifacts: {
+              report: { path: "reports/job_art_01/dossier.md", preview: "artifact preview" },
+            },
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && req.url) {
+        const requestUrl = new URL(req.url, "http://127.0.0.1");
+        if (
+          requestUrl.pathname === "/research/experiments" &&
+          requestUrl.searchParams.get("status") === "queued" &&
+          requestUrl.searchParams.get("limit") === "5"
+        ) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ok: true,
+              experiments: [
+                {
+                  schema_version: "experiment_queue_item.v1",
+                  experiment_id: "exp_safe_01",
+                  status: "queued",
+                  created_at: "2026-03-09T00:00:00+00:00",
+                  hypothesis: "test",
+                  change_set: ["max_total_sources=8"],
+                  success_metric: "improve overall",
+                  rollback_condition: "grounding drop",
+                  benchmark_jobs: ["portable dog water bottle market"],
+                },
+              ],
+            }),
+          );
+          return;
+        }
+      }
+      if (req.method === "POST" && req.url === "/research/experiments/exp_safe_01/decision") {
+        seen.decisionActor = String(req.headers["x-openclaw-actor-id"] ?? "");
+        const body = (await readJsonBody(req)) as Record<string, unknown>;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            experiment: {
+              schema_version: "experiment_queue_item.v1",
+              experiment_id: "exp_safe_01",
+              status: body.decision === "approve" ? "approved" : "queued",
+              created_at: "2026-03-09T00:00:00+00:00",
+              hypothesis: "test",
+              change_set: ["max_total_sources=8"],
+              success_metric: "improve overall",
+              rollback_condition: "grounding drop",
+              benchmark_jobs: ["portable dog water bottle market"],
+            },
+          }),
+        );
+        return;
+      }
+      if (req.method === "POST" && req.url === "/research/experiments/exp_safe_01/execute") {
+        seen.executeActor = String(req.headers["x-openclaw-actor-id"] ?? "");
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            decision: "adopt",
+            result_path: "reports/experiments/exp_safe_01/experiment_result.json",
+            experiment: {
+              schema_version: "experiment_queue_item.v1",
+              experiment_id: "exp_safe_01",
+              status: "completed",
+              created_at: "2026-03-09T00:00:00+00:00",
+              hypothesis: "test",
+              change_set: ["max_total_sources=8"],
+              success_metric: "improve overall",
+              rollback_condition: "grounding drop",
+              benchmark_jobs: ["portable dog water bottle market"],
+            },
+          }),
+        );
+        return;
+      }
+      if (req.method === "POST" && req.url === "/chat/send") {
+        seen.chatActor = String(req.headers["x-openclaw-actor-id"] ?? "");
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            model: "qwen2.5:7b-instruct",
+            reply: "hello from local worker",
+          }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    const upstreamPort = await listen(upstream);
+
+    const restoreEnv = applyRelayEnv({
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
+      RESEARCH_ACTOR_ID: "jarvis.vps",
+    });
+    try {
+      const artifacts = await fetchResearchRelayArtifacts({
+        jobId: "job_art_01",
+        includeText: true,
+        env: process.env,
+      });
+      expect(artifacts.ok).toBe(true);
+      if (artifacts.ok) {
+        expect(artifacts.jobId).toBe("job_art_01");
+        expect((artifacts.artifacts.report as { preview?: string }).preview).toBe(
+          "artifact preview",
+        );
+      }
+
+      const experiments = await fetchResearchRelayExperiments({
+        status: "queued",
+        limit: 5,
+        env: process.env,
+      });
+      expect(experiments.ok).toBe(true);
+      if (experiments.ok) {
+        expect(experiments.experiments).toHaveLength(1);
+      }
+
+      const decision = await decideResearchRelayExperiment({
+        experimentId: "exp_safe_01",
+        decision: "approve",
+        env: process.env,
+      });
+      expect(decision.ok).toBe(true);
+
+      const execution = await executeResearchRelayExperiment({
+        experimentId: "exp_safe_01",
+        env: process.env,
+      });
+      expect(execution.ok).toBe(true);
+      if (execution.ok) {
+        expect(execution.decision).toBe("adopt");
+      }
+
+      const chat = await sendResearchRelayChat({
+        message: "hello",
+        env: process.env,
+      });
+      expect(chat.ok).toBe(true);
+      if (chat.ok) {
+        expect(chat.reply).toBe("hello from local worker");
+      }
+
+      expect(seen.decisionActor).toBe("jarvis.vps");
+      expect(seen.executeActor).toBe("jarvis.vps");
+      expect(seen.chatActor).toBe("jarvis.vps");
     } finally {
       restoreEnv();
       await closeServer(upstream);

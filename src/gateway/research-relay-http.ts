@@ -33,6 +33,7 @@ type ResearchRelayConfig = {
   sharedToken?: string;
   actorId?: string;
   requestTimeoutMs: number;
+  executeRequestTimeoutMs: number;
   maxTopicLen: number;
   maxLabelLen: number;
   configError?: string;
@@ -362,6 +363,12 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     min: MIN_TIMEOUT_SEC,
     max: MAX_TIMEOUT_SEC,
   });
+  const executeRequestTimeoutSec = readPositiveIntWithClamp({
+    value: env.RESEARCH_EXPERIMENT_EXECUTE_TIMEOUT_SEC,
+    fallback: Math.max(requestTimeoutSec, 1800),
+    min: MIN_TIMEOUT_SEC,
+    max: 7200,
+  });
   const maxTopicLen = readPositiveIntWithClamp({
     value: env.RESEARCH_MAX_TOPIC_LEN,
     fallback: DEFAULT_MAX_TOPIC_LEN,
@@ -382,6 +389,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
       sharedToken,
       actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
+      executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
     };
@@ -392,6 +400,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
       sharedToken,
       actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
+      executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
       configError: "RESEARCH_UPSTREAM_URL is required when relay is enabled.",
@@ -407,6 +416,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
       sharedToken,
       actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
+      executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
       configError: "RESEARCH_UPSTREAM_URL must be a valid http/https URL.",
@@ -419,6 +429,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
       sharedToken,
       actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
+      executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
       configError: "RESEARCH_UPSTREAM_URL protocol must be http or https.",
@@ -430,6 +441,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
       sharedToken,
       actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
+      executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
       configError: "RESEARCH_UPSTREAM_URL must not include URL credentials.",
@@ -441,6 +453,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
       sharedToken,
       actorId,
       requestTimeoutMs: requestTimeoutSec * 1_000,
+      executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
       maxTopicLen,
       maxLabelLen,
       configError: "RESEARCH_UPSTREAM_URL host must be loopback/private IP or a .ts.net hostname.",
@@ -453,6 +466,7 @@ function resolveResearchRelayConfig(env: NodeJS.ProcessEnv = process.env): Resea
     sharedToken,
     actorId,
     requestTimeoutMs: requestTimeoutSec * 1_000,
+    executeRequestTimeoutMs: executeRequestTimeoutSec * 1_000,
     maxTopicLen,
     maxLabelLen,
   };
@@ -1407,7 +1421,7 @@ export async function executeResearchRelayExperiment(params: {
     target,
     method: "POST",
     body: params.force ? { force: true } : {},
-    timeoutMs: enabled.config.requestTimeoutMs,
+    timeoutMs: enabled.config.executeRequestTimeoutMs,
     sharedToken: enabled.config.sharedToken,
     actorId: enabled.config.actorId,
     routeTag: "/research/experiments/:experiment_id/execute",

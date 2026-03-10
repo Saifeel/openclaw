@@ -6,6 +6,7 @@ import {
   executeResearchRelayExperiment,
   fetchResearchRelayArtifacts,
   fetchResearchRelayExperiments,
+  researchRelayTesting,
   sendResearchRelayChat,
 } from "./research-relay-http.js";
 import { createGatewayHttpServer } from "./server-http.js";
@@ -18,6 +19,7 @@ const RELAY_ENV_KEYS = [
   "RESEARCH_SHARED_TOKEN",
   "RESEARCH_ACTOR_ID",
   "RESEARCH_REQUEST_TIMEOUT_SEC",
+  "RESEARCH_EXPERIMENT_EXECUTE_TIMEOUT_SEC",
   "RESEARCH_MAX_TOPIC_LEN",
   "RESEARCH_MAX_LABEL_LEN",
 ] as const;
@@ -955,5 +957,18 @@ describe("research relay HTTP endpoints", () => {
       restoreEnv();
       await closeServer(upstream);
     }
+  });
+
+  it("uses a dedicated execute timeout when configured", () => {
+    const config = researchRelayTesting.resolveResearchRelayConfig({
+      ...process.env,
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: "http://127.0.0.1:8787",
+      RESEARCH_REQUEST_TIMEOUT_SEC: "15",
+      RESEARCH_EXPERIMENT_EXECUTE_TIMEOUT_SEC: "1800",
+    });
+
+    expect(config.requestTimeoutMs).toBe(15_000);
+    expect(config.executeRequestTimeoutMs).toBe(1_800_000);
   });
 });

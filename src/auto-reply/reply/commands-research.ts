@@ -516,6 +516,7 @@ function formatExperimentsList(experiments: Array<Record<string, unknown>>): str
     const bits = [
       `status=${status}`,
       priority ? `priority=${priority}` : "",
+      `auto_generated=${experiment.auto_generated === true ? "yes" : "no"}`,
       `eligible=${eligibility.eligible ? "yes" : "no"}`,
       benchmarkCount > 0 ? `benchmarks=${benchmarkCount}` : "",
       changeSet ? `changes=${changeSet}` : "",
@@ -643,7 +644,7 @@ async function formatNightlySummary(limit: number): Promise<string> {
       const eligibility = assessExperimentEligibility(experiment);
       const priority = readScalarField(experiment, ["priority"]);
       lines.push(
-        `- ${experimentId} | eligible=${eligibility.eligible ? "yes" : "no"}${priority ? ` | priority=${priority}` : ""}`,
+        `- ${experimentId} | auto_generated=${experiment.auto_generated === true ? "yes" : "no"} | eligible=${eligibility.eligible ? "yes" : "no"}${priority ? ` | priority=${priority}` : ""}`,
       );
     }
   }

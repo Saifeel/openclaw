@@ -233,6 +233,7 @@ describe("/research command", () => {
 
     expect(result.shouldContinue).toBe(false);
     expect(result.reply?.text).toContain("exp_safe_01");
+    expect(result.reply?.text).toContain("auto_generated=yes");
     expect(result.reply?.text).toContain("eligible=yes");
     expect(fetchResearchRelayExperimentsMock).toHaveBeenCalledWith(
       expect.objectContaining({ status: "queued", limit: 5 }),
@@ -370,6 +371,7 @@ describe("/research command", () => {
     expect(result.shouldContinue).toBe(false);
     expect(result.reply?.text).toContain("Research nightly summary:");
     expect(result.reply?.text).toContain("completion_like=1");
+    expect(result.reply?.text).toContain("auto_generated=yes");
     expect(result.reply?.text).toContain("imp_001");
     expect(result.reply?.text).toContain("exp_safe_01");
   });

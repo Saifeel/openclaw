@@ -1658,6 +1658,192 @@ async function handleResearchHealthOrStatus(params: {
   return true;
 }
 
+async function handleResearchArtifactsOrExperiments(params: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  requestPath: string;
+  requestSearch: string;
+  config: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId: string;
+}) {
+  const artifactsPrefix = "/research/artifacts/";
+  if (params.requestPath.startsWith(artifactsPrefix)) {
+    if (params.req.method !== "GET") {
+      sendMethodNotAllowed(params.res, "GET");
+      return true;
+    }
+    const jobId = normalizeJobId(
+      decodeURIComponent(params.requestPath.slice(artifactsPrefix.length)),
+    );
+    if (!jobId) {
+      sendInvalidRequest(params.res, "Invalid job_id in path.");
+      return true;
+    }
+    const query = new URLSearchParams(params.requestSearch);
+    const includeTextRaw = query.get("include_text");
+    const includeText =
+      includeTextRaw == null || includeTextRaw.trim().length === 0
+        ? true
+        : parseBooleanValue(includeTextRaw) !== false;
+    const artifacts = await fetchResearchRelayArtifacts({
+      jobId,
+      includeText,
+      config: params.config,
+      requestId: params.requestId,
+    });
+    if (!artifacts.ok) {
+      log.warn(
+        `research artifacts requestId=${params.requestId} upstream error: ${artifacts.error}`,
+      );
+      applyRetryAfterHeader(params.res, artifacts.retryAfterSec);
+      sendJson(params.res, artifacts.statusCode, { ok: false, error: artifacts.error });
+      observeClientStatus({
+        statusCode: artifacts.statusCode,
+        route: "/research/artifacts/:job_id",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    sendJson(params.res, 200, artifacts.raw);
+    return true;
+  }
+
+  if (params.requestPath === "/research/experiments") {
+    if (params.req.method !== "GET") {
+      sendMethodNotAllowed(params.res, "GET");
+      return true;
+    }
+    const query = new URLSearchParams(params.requestSearch);
+    const rawLimit = query.get("limit");
+    const parsedLimit =
+      rawLimit == null || rawLimit.trim().length === 0 ? undefined : Number.parseInt(rawLimit, 10);
+    const limit = normalizeJobsLimit(parsedLimit);
+    if (parsedLimit != null && limit == null) {
+      sendInvalidRequest(params.res, "Invalid experiments limit. Use 1-100.");
+      return true;
+    }
+    const experiments = await fetchResearchRelayExperiments({
+      status: query.get("status") ?? undefined,
+      limit,
+      config: params.config,
+      requestId: params.requestId,
+    });
+    if (!experiments.ok) {
+      log.warn(
+        `research experiments requestId=${params.requestId} upstream error: ${experiments.error}`,
+      );
+      applyRetryAfterHeader(params.res, experiments.retryAfterSec);
+      sendJson(params.res, experiments.statusCode, { ok: false, error: experiments.error });
+      observeClientStatus({
+        statusCode: experiments.statusCode,
+        route: "/research/experiments",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    sendJson(
+      params.res,
+      200,
+      isObjectRecord(experiments.raw)
+        ? experiments.raw
+        : { ok: true, experiments: experiments.experiments },
+    );
+    return true;
+  }
+
+  const experimentsPrefix = "/research/experiments/";
+  if (!params.requestPath.startsWith(experimentsPrefix)) {
+    return false;
+  }
+  const suffix = params.requestPath.slice(experimentsPrefix.length);
+  const decisionMatch = suffix.match(/^([^/]+)\/decision$/);
+  if (decisionMatch) {
+    if (params.req.method !== "POST") {
+      sendMethodNotAllowed(params.res, "POST");
+      return true;
+    }
+    const experimentId = normalizeExperimentId(decodeURIComponent(decisionMatch[1] ?? ""));
+    if (!experimentId) {
+      sendInvalidRequest(params.res, "Invalid experiment_id in path.");
+      return true;
+    }
+    const bodyUnknown = await readJsonBodyOrError(params.req, params.res, MAX_BODY_BYTES);
+    if (bodyUnknown === undefined) {
+      return true;
+    }
+    const body = isObjectRecord(bodyUnknown) ? bodyUnknown : {};
+    const decisionRaw = readString(body.decision);
+    if (decisionRaw !== "approve" && decisionRaw !== "reject" && decisionRaw !== "complete") {
+      sendInvalidRequest(params.res, "Field `decision` must be approve, reject, or complete.");
+      return true;
+    }
+    const result = await decideResearchRelayExperiment({
+      experimentId,
+      decision: decisionRaw,
+      notes: readString(body.notes),
+      config: params.config,
+      requestId: params.requestId,
+    });
+    if (!result.ok) {
+      log.warn(
+        `research experiment decision requestId=${params.requestId} upstream error: ${result.error}`,
+      );
+      applyRetryAfterHeader(params.res, result.retryAfterSec);
+      sendJson(params.res, result.statusCode, { ok: false, error: result.error });
+      observeClientStatus({
+        statusCode: result.statusCode,
+        route: "/research/experiments/:experiment_id/decision",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    sendJson(params.res, 200, result.raw);
+    return true;
+  }
+
+  const executeMatch = suffix.match(/^([^/]+)\/execute$/);
+  if (executeMatch) {
+    if (params.req.method !== "POST") {
+      sendMethodNotAllowed(params.res, "POST");
+      return true;
+    }
+    const experimentId = normalizeExperimentId(decodeURIComponent(executeMatch[1] ?? ""));
+    if (!experimentId) {
+      sendInvalidRequest(params.res, "Invalid experiment_id in path.");
+      return true;
+    }
+    const bodyUnknown = await readJsonBodyOrError(params.req, params.res, MAX_BODY_BYTES);
+    if (bodyUnknown === undefined) {
+      return true;
+    }
+    const body = isObjectRecord(bodyUnknown) ? bodyUnknown : {};
+    const result = await executeResearchRelayExperiment({
+      experimentId,
+      force: parseBooleanValue(body.force) === true,
+      config: params.config,
+      requestId: params.requestId,
+    });
+    if (!result.ok) {
+      log.warn(
+        `research experiment execute requestId=${params.requestId} upstream error: ${result.error}`,
+      );
+      applyRetryAfterHeader(params.res, result.retryAfterSec);
+      sendJson(params.res, result.statusCode, { ok: false, error: result.error });
+      observeClientStatus({
+        statusCode: result.statusCode,
+        route: "/research/experiments/:experiment_id/execute",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    sendJson(params.res, 200, result.raw);
+    return true;
+  }
+
+  sendJson(params.res, 404, { ok: false, error: "Not Found" });
+  return true;
+}
+
 export async function handleResearchRelayHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1678,13 +1864,33 @@ export async function handleResearchRelayHttpRequest(
   const isJobs = requestPath === "/research/jobs";
   const isStatus = requestPath.startsWith("/research/status/");
   const isResult = requestPath.startsWith("/research/result/");
+  const isArtifacts = requestPath.startsWith("/research/artifacts/");
+  const isExperiments =
+    requestPath === "/research/experiments" || requestPath.startsWith("/research/experiments/");
   const isResearchPrefixed =
     requestPath === "/research" || requestPath.startsWith(RESEARCH_PATH_PREFIX);
-  if (!isSubmit && !isHealth && !isJobs && !isStatus && !isResult && isResearchPrefixed) {
+  if (
+    !isSubmit &&
+    !isHealth &&
+    !isJobs &&
+    !isStatus &&
+    !isResult &&
+    !isArtifacts &&
+    !isExperiments &&
+    isResearchPrefixed
+  ) {
     sendJson(res, 404, { ok: false, error: "Not Found" });
     return true;
   }
-  if (!isSubmit && !isHealth && !isJobs && !isStatus && !isResult) {
+  if (
+    !isSubmit &&
+    !isHealth &&
+    !isJobs &&
+    !isStatus &&
+    !isResult &&
+    !isArtifacts &&
+    !isExperiments
+  ) {
     return false;
   }
 
@@ -1711,6 +1917,16 @@ export async function handleResearchRelayHttpRequest(
 
   if (isSubmit) {
     return await handleResearchSubmit({ req, res, config: enabledConfig, requestId });
+  }
+  if (isArtifacts || isExperiments) {
+    return await handleResearchArtifactsOrExperiments({
+      req,
+      res,
+      requestPath,
+      requestSearch: requestUrl.search,
+      config: enabledConfig,
+      requestId,
+    });
   }
   return await handleResearchHealthOrStatus({
     req,

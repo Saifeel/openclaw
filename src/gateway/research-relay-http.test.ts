@@ -959,6 +959,170 @@ describe("research relay HTTP endpoints", () => {
     }
   });
 
+  it("routes artifacts and experiment actions through the gateway HTTP surface", async () => {
+    const seen = {
+      decisionActor: "",
+      executeActor: "",
+    };
+    const upstream = createServer(async (req, res) => {
+      if (
+        req.method === "GET" &&
+        req.url === "/research/artifacts/job_art_http?include_text=false"
+      ) {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "job_art_http",
+            run_id: "run_art_http",
+            status: "completed",
+            artifacts: {
+              report: { path: "reports/job_art_http/dossier.md" },
+            },
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && req.url) {
+        const requestUrl = new URL(req.url, "http://127.0.0.1");
+        if (
+          requestUrl.pathname === "/research/experiments" &&
+          requestUrl.searchParams.get("status") === "queued" &&
+          requestUrl.searchParams.get("limit") === "3"
+        ) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ok: true,
+              experiments: [
+                { experiment_id: "exp_http_01", status: "queued", auto_generated: true },
+              ],
+            }),
+          );
+          return;
+        }
+      }
+      if (req.method === "POST" && req.url === "/research/experiments/exp_http_01/decision") {
+        seen.decisionActor = String(req.headers["x-openclaw-actor-id"] ?? "");
+        const body = (await readJsonBody(req)) as Record<string, unknown>;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            experiment: {
+              experiment_id: "exp_http_01",
+              status: body.decision === "approve" ? "approved" : "queued",
+            },
+          }),
+        );
+        return;
+      }
+      if (req.method === "POST" && req.url === "/research/experiments/exp_http_01/execute") {
+        seen.executeActor = String(req.headers["x-openclaw-actor-id"] ?? "");
+        const body = (await readJsonBody(req)) as Record<string, unknown>;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            decision: "adopt",
+            forced: body.force === true,
+            result_path: "reports/experiments/exp_http_01/experiment_result.json",
+          }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    const upstreamPort = await listen(upstream);
+
+    const restoreEnv = applyRelayEnv({
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
+      RESEARCH_ACTOR_ID: "jarvis.vps",
+    });
+    try {
+      await withTempConfig({
+        prefix: "openclaw-research-relay-http-surface-",
+        cfg: { gateway: { trustedProxies: [] } },
+        run: async () => {
+          const { server, port } = await startGatewayHttpServer();
+          try {
+            const headers = { "x-openclaw-research-token": "relay-shared-token" };
+
+            const artifacts = await getJson({
+              port,
+              path: "/research/artifacts/job_art_http?include_text=false",
+              headers,
+            });
+            expect(artifacts.status).toBe(200);
+            expect(await artifacts.json()).toEqual({
+              ok: true,
+              job_id: "job_art_http",
+              run_id: "run_art_http",
+              status: "completed",
+              artifacts: {
+                report: { path: "reports/job_art_http/dossier.md" },
+              },
+            });
+
+            const experiments = await getJson({
+              port,
+              path: "/research/experiments?status=queued&limit=3",
+              headers,
+            });
+            expect(experiments.status).toBe(200);
+            expect(await experiments.json()).toEqual({
+              ok: true,
+              experiments: [
+                { experiment_id: "exp_http_01", status: "queued", auto_generated: true },
+              ],
+            });
+
+            const decision = await postJson({
+              port,
+              path: "/research/experiments/exp_http_01/decision",
+              headers,
+              body: { decision: "approve", notes: "looks safe" },
+            });
+            expect(decision.status).toBe(200);
+            expect(await decision.json()).toEqual({
+              ok: true,
+              experiment: { experiment_id: "exp_http_01", status: "approved" },
+            });
+
+            const execution = await postJson({
+              port,
+              path: "/research/experiments/exp_http_01/execute",
+              headers,
+              body: { force: true },
+            });
+            expect(execution.status).toBe(200);
+            expect(await execution.json()).toEqual({
+              ok: true,
+              decision: "adopt",
+              forced: true,
+              result_path: "reports/experiments/exp_http_01/experiment_result.json",
+            });
+
+            expect(seen.decisionActor).toBe("jarvis.vps");
+            expect(seen.executeActor).toBe("jarvis.vps");
+          } finally {
+            await closeServer(server);
+          }
+        },
+      });
+    } finally {
+      restoreEnv();
+      await closeServer(upstream);
+    }
+  });
+
   it("uses a dedicated execute timeout when configured", () => {
     const config = researchRelayTesting.resolveResearchRelayConfig({
       ...process.env,

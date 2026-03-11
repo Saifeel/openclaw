@@ -153,6 +153,20 @@ export type ResearchRelayJobsFetchResult =
       retryAfterSec?: number;
     };
 
+export type ResearchRelayCompletionsFetchResult =
+  | {
+      ok: true;
+      jobs: Array<Record<string, unknown>>;
+      raw: unknown;
+    }
+  | {
+      ok: false;
+      statusCode: number;
+      error: string;
+      reason: "disabled" | "misconfigured" | "invalid_limit" | "upstream_error";
+      retryAfterSec?: number;
+    };
+
 export type ResearchRelayArtifactsFetchResult =
   | {
       ok: true;
@@ -1117,7 +1131,7 @@ export async function fetchResearchRelayResult(params: {
     if (primary.upstreamStatusCode !== 404) {
       return {
         ok: false,
-        statusCode: primary.statusCode,
+        statusCode: primary.upstreamStatusCode ?? primary.statusCode,
         error: primary.error,
         reason: "upstream_error",
         retryAfterSec: primary.retryAfterSec,
@@ -1130,7 +1144,7 @@ export async function fetchResearchRelayResult(params: {
     if (!fallback.ok) {
       return {
         ok: false,
-        statusCode: fallback.statusCode,
+        statusCode: fallback.upstreamStatusCode ?? fallback.statusCode,
         error: fallback.error,
         reason: "upstream_error",
         retryAfterSec: fallback.retryAfterSec,
@@ -1229,6 +1243,59 @@ export async function fetchResearchRelayJobs(params: {
   };
   writeCached(jobsCache, jobsCacheKey, response, JOBS_CACHE_TTL_MS);
   return response;
+}
+
+export async function fetchResearchRelayCompletions(params: {
+  since?: string;
+  limit?: number;
+  env?: NodeJS.ProcessEnv;
+  config?: ResearchRelayConfig & { upstreamUrl: URL };
+  requestId?: string;
+}): Promise<ResearchRelayCompletionsFetchResult> {
+  const limit = normalizeJobsLimit(params.limit);
+  if (params.limit != null && limit == null) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Invalid completions limit. Use 1-100.",
+      reason: "invalid_limit",
+    };
+  }
+
+  const config = params.config ?? resolveResearchRelayConfig(params.env ?? process.env);
+  const enabled = resolveEnabledRelayConfig(config);
+  if (!enabled.ok) {
+    return enabled;
+  }
+  const target = buildUpstreamUrl(enabled.config.upstreamUrl, "/research/completions");
+  const since = readString(params.since);
+  if (since) {
+    target.searchParams.set("since", since);
+  }
+  if (limit != null) {
+    target.searchParams.set("limit", String(limit));
+  }
+  const result = await requestUpstream({
+    target,
+    method: "GET",
+    timeoutMs: enabled.config.requestTimeoutMs,
+    sharedToken: enabled.config.sharedToken,
+    routeTag: "/research/completions",
+    requestId: params.requestId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapUpstreamFailure(result),
+      reason: "upstream_error",
+    };
+  }
+
+  return {
+    ok: true,
+    jobs: normalizeJobsResponse(result.body),
+    raw: result.body,
+  };
 }
 
 export async function fetchResearchRelayArtifacts(params: {
@@ -1585,6 +1652,43 @@ async function handleResearchHealthOrStatus(params: {
     return true;
   }
 
+  if (params.requestPath === "/research/completions") {
+    const query = new URLSearchParams(params.requestSearch);
+    const rawLimit = query.get("limit");
+    const parsedLimit =
+      rawLimit == null || rawLimit.trim().length === 0 ? undefined : Number.parseInt(rawLimit, 10);
+    const limit = normalizeJobsLimit(parsedLimit);
+    if (parsedLimit != null && limit == null) {
+      sendInvalidRequest(params.res, "Invalid completions limit. Use 1-100.");
+      return true;
+    }
+    const completions = await fetchResearchRelayCompletions({
+      since: query.get("since") ?? undefined,
+      limit,
+      config: params.config,
+      requestId: params.requestId,
+    });
+    if (!completions.ok) {
+      log.warn(
+        `research completions requestId=${params.requestId} upstream error: ${completions.error}`,
+      );
+      applyRetryAfterHeader(params.res, completions.retryAfterSec);
+      sendJson(params.res, completions.statusCode, { ok: false, error: completions.error });
+      observeClientStatus({
+        statusCode: completions.statusCode,
+        route: "/research/completions",
+        detail: "upstream_error",
+      });
+      return true;
+    }
+    if (isObjectRecord(completions.raw)) {
+      sendJson(params.res, 200, completions.raw);
+      return true;
+    }
+    sendJson(params.res, 200, { ok: true, jobs: completions.jobs });
+    return true;
+  }
+
   const statusPrefix = "/research/status/";
   if (params.requestPath.startsWith(statusPrefix)) {
     const jobId = normalizeJobId(decodeURIComponent(params.requestPath.slice(statusPrefix.length)));
@@ -1607,9 +1711,10 @@ async function handleResearchHealthOrStatus(params: {
     if (!result.ok) {
       log.warn(`research status requestId=${params.requestId} upstream error: ${result.error}`);
       applyRetryAfterHeader(params.res, result.retryAfterSec);
-      sendJson(params.res, result.statusCode, { ok: false, error: result.error });
+      const statusCode = result.upstreamStatusCode ?? result.statusCode;
+      sendJson(params.res, statusCode, { ok: false, error: result.error });
       observeClientStatus({
-        statusCode: result.statusCode,
+        statusCode,
         route: "/research/status/:job_id",
         detail: "upstream_error",
       });
@@ -1862,6 +1967,7 @@ export async function handleResearchRelayHttpRequest(
   const isSubmit = requestPath === "/research/submit";
   const isHealth = requestPath === "/research/health";
   const isJobs = requestPath === "/research/jobs";
+  const isCompletions = requestPath === "/research/completions";
   const isStatus = requestPath.startsWith("/research/status/");
   const isResult = requestPath.startsWith("/research/result/");
   const isArtifacts = requestPath.startsWith("/research/artifacts/");
@@ -1873,6 +1979,7 @@ export async function handleResearchRelayHttpRequest(
     !isSubmit &&
     !isHealth &&
     !isJobs &&
+    !isCompletions &&
     !isStatus &&
     !isResult &&
     !isArtifacts &&
@@ -1886,6 +1993,7 @@ export async function handleResearchRelayHttpRequest(
     !isSubmit &&
     !isHealth &&
     !isJobs &&
+    !isCompletions &&
     !isStatus &&
     !isResult &&
     !isArtifacts &&

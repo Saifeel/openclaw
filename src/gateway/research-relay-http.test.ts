@@ -5,6 +5,7 @@ import {
   decideResearchRelayExperiment,
   executeResearchRelayExperiment,
   fetchResearchRelayArtifacts,
+  fetchResearchRelayCompletions,
   fetchResearchRelayExperiments,
   researchRelayTesting,
   sendResearchRelayChat,
@@ -829,6 +830,36 @@ describe("research relay HTTP endpoints", () => {
           );
           return;
         }
+        if (
+          requestUrl.pathname === "/research/completions" &&
+          requestUrl.searchParams.get("since") === "cursor_123" &&
+          requestUrl.searchParams.get("limit") === "2"
+        ) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ok: true,
+              jobs: [{ job_id: "job_done_01", status: "completed", summary: "done" }],
+            }),
+          );
+          return;
+        }
+        if (
+          requestUrl.pathname === "/research/completions" &&
+          requestUrl.searchParams.get("since") === "cursor_http" &&
+          requestUrl.searchParams.get("limit") === "2"
+        ) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ok: true,
+              jobs: [{ job_id: "job_http_done", status: "completed", summary: "complete" }],
+            }),
+          );
+          return;
+        }
       }
       if (req.method === "POST" && req.url === "/research/experiments/exp_safe_01/decision") {
         seen.decisionActor = String(req.headers["x-openclaw-actor-id"] ?? "");
@@ -925,6 +956,16 @@ describe("research relay HTTP endpoints", () => {
         expect(experiments.experiments).toHaveLength(1);
       }
 
+      const completions = await fetchResearchRelayCompletions({
+        since: "cursor_123",
+        limit: 2,
+        env: process.env,
+      });
+      expect(completions.ok).toBe(true);
+      if (completions.ok) {
+        expect(completions.jobs).toHaveLength(1);
+      }
+
       const decision = await decideResearchRelayExperiment({
         experimentId: "exp_safe_01",
         decision: "approve",
@@ -999,6 +1040,21 @@ describe("research relay HTTP endpoints", () => {
               experiments: [
                 { experiment_id: "exp_http_01", status: "queued", auto_generated: true },
               ],
+            }),
+          );
+          return;
+        }
+        if (
+          requestUrl.pathname === "/research/completions" &&
+          requestUrl.searchParams.get("since") === "cursor_http" &&
+          requestUrl.searchParams.get("limit") === "2"
+        ) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ok: true,
+              jobs: [{ job_id: "job_http_done", status: "completed", summary: "complete" }],
             }),
           );
           return;
@@ -1084,6 +1140,17 @@ describe("research relay HTTP endpoints", () => {
               ],
             });
 
+            const completions = await getJson({
+              port,
+              path: "/research/completions?since=cursor_http&limit=2",
+              headers,
+            });
+            expect(completions.status).toBe(200);
+            expect(await completions.json()).toEqual({
+              ok: true,
+              jobs: [{ job_id: "job_http_done", status: "completed", summary: "complete" }],
+            });
+
             const decision = await postJson({
               port,
               path: "/research/experiments/exp_http_01/decision",
@@ -1134,5 +1201,62 @@ describe("research relay HTTP endpoints", () => {
 
     expect(config.requestTimeoutMs).toBe(15_000);
     expect(config.executeRequestTimeoutMs).toBe(1_800_000);
+  });
+
+  it("preserves upstream 404 for missing status and result jobs", async () => {
+    const upstream = createServer((req, res) => {
+      if (
+        req.method === "GET" &&
+        (req.url === "/research/status/job_missing_01" ||
+          req.url === "/research/result/job_missing_01")
+      ) {
+        res.statusCode = 404;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: false, error: "Job not found" }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    const upstreamPort = await listen(upstream);
+
+    const restoreEnv = applyRelayEnv({
+      RESEARCH_RELAY_ENABLED: "true",
+      RESEARCH_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}`,
+      RESEARCH_SHARED_TOKEN: "relay-shared-token",
+    });
+    try {
+      await withTempConfig({
+        prefix: "openclaw-research-relay-http-404-",
+        cfg: { gateway: { trustedProxies: [] } },
+        run: async () => {
+          const { server, port } = await startGatewayHttpServer();
+          try {
+            const headers = { "x-openclaw-research-token": "relay-shared-token" };
+
+            const status = await getJson({
+              port,
+              path: "/research/status/job_missing_01",
+              headers,
+            });
+            expect(status.status).toBe(404);
+            expect(await status.json()).toEqual({ ok: false, error: "Job not found" });
+
+            const result = await getJson({
+              port,
+              path: "/research/result/job_missing_01",
+              headers,
+            });
+            expect(result.status).toBe(404);
+            expect(await result.json()).toEqual({ ok: false, error: "Job not found" });
+          } finally {
+            await closeServer(server);
+          }
+        },
+      });
+    } finally {
+      restoreEnv();
+      await closeServer(upstream);
+    }
   });
 });

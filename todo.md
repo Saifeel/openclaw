@@ -153,6 +153,12 @@ Definition of done:
 
 ## Phase 7: Cutover
 
+- Current status:
+  - Completed
+  - Docker gateway stopped
+  - host-run gateway now serves loopback port `18789`
+  - post-cutover relay checks passed for `/research/health`, `/research/completions`, and `/research/jobs`
+
 - Stop the containerized gateway
 - Start the host-run service on the real production port
 - Verify gateway health
@@ -166,6 +172,11 @@ Definition of done:
 
 ## Phase 8: Remove Old Wrapper
 
+- Current status:
+  - In progress
+  - Docker gateway is stopped and no longer active
+  - Compose path retained only for rollback
+
 - Disable the old gateway container
 - Remove the old container path from active operations
 - Remove the old `docker.sock` mount from the public-facing gateway path
@@ -176,6 +187,12 @@ Definition of done:
 - There is no ambiguous dual-runtime setup left behind
 
 ## Phase 9: Post-Migration Hardening
+
+- Current status:
+  - In progress
+  - loopback-only host-run service verified on `18789`
+  - private worker relay verified after cutover
+  - service template tightened to avoid write access to the repo checkout
 
 - Recheck firewall exposure
 - Recheck bind settings

@@ -19,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/home/saifeel/openclaw /home/saifeel/.openclaw
+ReadWritePaths=/home/saifeel/.openclaw
 
 [Install]
 WantedBy=multi-user.target

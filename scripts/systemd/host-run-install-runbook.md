@@ -125,7 +125,41 @@ sudo systemctl restart openclaw-gateway-host.service
 sudo systemctl status openclaw-gateway-host.service --no-pager
 ```
 
-## 7. Roll back if needed
+## 7. Retire the old wrapper path
+
+Once the host-run gateway is stable on `18789`, leave the Docker gateway stopped:
+
+```bash
+cd /home/saifeel/openclaw
+docker compose ps
+```
+
+Expected:
+
+- no running `openclaw-gateway` container
+
+Keep the Compose definition only as rollback material until the host-run service has been
+stable long enough for you to trust the new path.
+
+## 8. Post-cutover hardening
+
+Confirm the final operating model stays narrow:
+
+```bash
+sudo systemctl status openclaw-gateway-host.service --no-pager --lines=40
+curl -sS -H "Authorization: Bearer <gateway-token>" -H "x-openclaw-research-token: <worker-token>" http://127.0.0.1:18789/research/health
+curl -sS -H "Authorization: Bearer <gateway-token>" -H "x-openclaw-research-token: <worker-token>" http://127.0.0.1:18789/research/jobs?limit=3
+```
+
+Recheck these constraints:
+
+- host-run gateway still binds to loopback
+- worker upstream remains the private Tailscale URL
+- no new public-facing ports were opened
+- Docker gateway stays stopped
+- the host-run service only needs write access to `/home/saifeel/.openclaw`
+
+## 9. Roll back if needed
 
 ```bash
 sudo systemctl stop openclaw-gateway-host.service

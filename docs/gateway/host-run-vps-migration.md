@@ -100,6 +100,7 @@ The example unit in this repo uses:
 - `WorkingDirectory` pointing at the checked-out repo
 - `EnvironmentFile=/etc/openclaw/openclaw-gateway.env`
 - `ExecStart=/usr/bin/node dist/index.js gateway ...`
+- write access only to the OpenClaw state directory, not to the repo checkout
 
 ## Recommended cutover path
 
@@ -110,6 +111,8 @@ The example unit in this repo uses:
 5. Start the host-run gateway on an alternate port first.
 6. Verify parity with the Dockerized gateway using authenticated relay routes such as `/research/health`, `/research/jobs`, and `/research/completions`.
 7. Cut over the real port once parity is confirmed.
+8. Leave the Docker gateway stopped and keep the Compose path only as rollback material until the host-run service has proven stable.
+9. Recheck loopback binding, relay health, and the absence of new public-facing ports.
 
 ## Risks to watch
 

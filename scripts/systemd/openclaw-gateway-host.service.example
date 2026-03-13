@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenClaw Gateway (host-run)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=saifeel
+Group=saifeel
+SupplementaryGroups=docker
+WorkingDirectory=/home/saifeel/openclaw
+EnvironmentFile=/etc/openclaw/openclaw-gateway.env
+Environment=PATH=/home/saifeel/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/sh -lc 'exec /usr/bin/node dist/index.js gateway --bind "${OPENCLAW_GATEWAY_BIND:-loopback}" --port "${OPENCLAW_GATEWAY_PORT:-18789}"'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/saifeel/openclaw /home/saifeel/.openclaw
+
+[Install]
+WantedBy=multi-user.target

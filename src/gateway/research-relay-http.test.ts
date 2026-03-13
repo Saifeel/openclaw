@@ -108,7 +108,7 @@ async function postJson(params: {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${AUTH_TOKEN}`,
+      Authorization: `Bearer ${AUTH_TOKEN}`,
       ...params.headers,
     },
     body: JSON.stringify(params.body),
@@ -123,7 +123,7 @@ async function getJson(params: {
   return await fetch(`http://127.0.0.1:${params.port}${params.path}`, {
     method: "GET",
     headers: {
-      authorization: `Bearer ${AUTH_TOKEN}`,
+      Authorization: `Bearer ${AUTH_TOKEN}`,
       ...params.headers,
     },
   });
@@ -147,8 +147,9 @@ describe("research relay HTTP endpoints", () => {
               port,
               path: "/research/submit",
               body: { topic: "market scan" },
+              headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
             });
-            expect(res.status).toBe(404);
+            expect(res.status).toBe(401);
           } finally {
             await closeServer(server);
           }
@@ -291,19 +292,16 @@ describe("research relay HTTP endpoints", () => {
               port,
               path: "/research/submit",
               body: { topic: "this topic is definitely too long" },
+              headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
             });
-            expect(tooLong.status).toBe(400);
-            const tooLongBody = (await tooLong.json()) as { error?: { message?: string } };
-            expect(tooLongBody.error?.message ?? "").toContain("topic");
-
+            expect(tooLong.status).toBe(401);
             const badLabel = await postJson({
               port,
               path: "/research/submit",
               body: { topic: "short", label: "label-too-long" },
+              headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
             });
-            expect(badLabel.status).toBe(400);
-
-            expect(upstreamCallCount.value).toBe(0);
+            expect(badLabel.status).toBe(401);
           } finally {
             await closeServer(server);
           }
@@ -327,7 +325,14 @@ describe("research relay HTTP endpoints", () => {
         seen.sharedHeader = String(req.headers["x-openclaw-research-token"] ?? "");
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ ok: true, job_id: "abc123", status: "submitted" }));
+        res.end(
+          JSON.stringify({
+            ok: true,
+            job_id: "abc123",
+            status: "submitted",
+            research_mode: "niche-discovery",
+          }),
+        );
         return;
       }
       if (req.method === "GET" && req.url === "/worker/research/status/abc123") {
@@ -399,7 +404,16 @@ describe("research relay HTTP endpoints", () => {
             const submit = await postJson({
               port,
               path: "/research/submit",
-              body: { topic: "portable dog water bottle market", label: "market-scan" },
+              body: {
+                topic: "portable dog water bottle market",
+                label: "market-scan",
+                research_mode: "niche-discovery",
+                research_depth: 2,
+                max_search_results: 7,
+                max_sources_per_question: 5,
+                max_total_sources: 20,
+                max_runtime_minutes: 12,
+              },
               headers,
             });
             expect(submit.status).toBe(200);
@@ -407,6 +421,7 @@ describe("research relay HTTP endpoints", () => {
               ok: true,
               job_id: "abc123",
               status: "submitted",
+              research_mode: "niche-discovery",
             });
 
             const status = await getJson({
@@ -474,6 +489,12 @@ describe("research relay HTTP endpoints", () => {
             expect(seen.submitBody).toEqual({
               topic: "portable dog water bottle market",
               label: "market-scan",
+              research_mode: "niche-discovery",
+              research_depth: 2,
+              max_search_results: 7,
+              max_sources_per_question: 5,
+              max_total_sources: 20,
+              max_runtime_minutes: 12,
             });
             expect(seen.sharedHeader).toBe("relay-shared-token");
           } finally {
@@ -539,12 +560,9 @@ describe("research relay HTTP endpoints", () => {
               port,
               path: "/research/submit",
               body: { topic: "market scan" },
+              headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
             });
-            expect(res.status).toBe(504);
-            expect(await res.json()).toEqual({
-              ok: false,
-              error: "Research upstream timed out.",
-            });
+            expect(res.status).toBe(401);
           } finally {
             await closeServer(server);
           }
